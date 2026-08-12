@@ -1,4 +1,4 @@
-! Copyright (c) 2025, The Neko Authors
+! Copyright (c) 2025-2026, The Neko Authors
 ! All rights reserved.
 !
 ! Redistribution and use in source and binary forms, with or without
@@ -44,6 +44,7 @@ module fluid_scheme_compressible
   use mesh, only : mesh_t
   use scratch_registry, only : neko_scratch_registry
   use space, only : GLL
+  use euler_idp, only : euler_idp_t
   use user_intf, only : user_t, user_material_properties_intf, &
        dummy_user_material_properties
   use json_utils, only : json_get_or_default, json_get_or_lookup_or_default
@@ -79,6 +80,9 @@ module fluid_scheme_compressible
      type(field_t), pointer :: kappa => null() !< Thermal conductivity
 
      real(kind=rp) :: gamma
+
+     !> Owner of Euler IDP state.
+     type(euler_idp_t) :: euler_idp
 
      !> Global number of GLL points for the fluid (not unique)
      integer(kind=i8) :: glb_n_points
@@ -227,6 +231,8 @@ contains
     ! Compressible parameters
     call json_get_or_default(params, 'case.fluid.gamma', this%gamma, 1.4_rp)
 
+    call this%euler_idp%init(params)
+
     ! Calculate global points for logging
     this%glb_n_points = int(this%msh%glb_nelv, i8)*int(this%Xh%lxyz, i8)
     this%glb_unique_points = int(glsum(this%c_Xh%mult, this%dm_Xh%size()), i8)
@@ -243,6 +249,9 @@ contains
     class(fluid_scheme_compressible_t), intent(inout) :: this
     class(bc_t), pointer :: bc
     integer :: i
+
+    ! IDP in progress: Free owned state before shared SEM data.
+    call this%euler_idp%free()
 
     do i = 1, this%bcs_vel%size()
        bc => this%bcs_vel%get(i)
@@ -390,7 +399,8 @@ contains
 
       n = Xh%lx * Xh%ly * Xh%lz * msh%nelv
 
-      ! Use the compressible CFL function with precomputed maximum wave speed
+      ! IDP in progress: Replace this mesh-size CFL estimate with the exact
+      ! graph-viscosity CFL bound returned by the completed IDP owner.
       c = cfl_compressible(dt, max_wave_speed%x, Xh, c_Xh, msh%nelv, msh%gdim)
     end associate
 

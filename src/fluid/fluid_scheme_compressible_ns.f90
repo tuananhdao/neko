@@ -103,6 +103,8 @@ module fluid_scheme_compressible_ns
           => fluid_scheme_compressible_ns_setup_bcs
      procedure, pass(this) :: compute_h
      procedure, pass(this), private :: setup_regularization
+     procedure, pass(this), private :: step_euler_idp &
+          => fluid_scheme_compressible_ns_step_euler_idp
   end type fluid_scheme_compressible_ns_t
 
   interface
@@ -234,6 +236,9 @@ contains
     call json_get_or_default(params, 'case.numerics.time_order', rk_order, 4)
     call this%rk_scheme%init(rk_order)
 
+    ! IDP in progress: Initialise each implemented IDP component here and
+    ! validate only the assumptions required by that component.
+
     call neko_log%section("Fluid boundary conditions")
     ! Set up boundary conditions
     call this%setup_bcs(user, params)
@@ -325,12 +330,16 @@ contains
       ! Refresh user-specified physical viscosity/conductivity before RHS.
       call this%update_material_properties(time)
 
-      ! Execute RHS step with artificial viscosity field
-      call compressible_rhs%step(rho, m_x, m_y, m_z, E, &
-           p, u, v, w, this%Ax, &
-           this%Ax_stress, c_Xh, gs_Xh, h, this%artificial_visc, this%mu, &
-           this%kappa, this%bcs_vel, time, rk_scheme, dt)
+      if (this%euler_idp%enabled) then
+         call this%step_euler_idp(time)
+      else
+         call compressible_rhs%step(rho, m_x, m_y, m_z, E, &
+              p, u, v, w, this%Ax, &
+              this%Ax_stress, c_Xh, gs_Xh, h, this%artificial_visc, this%mu, &
+              this%kappa, this%bcs_vel, time, rk_scheme, dt)
+      end if
 
+      ! IDP in progress: Replace this repair with a non-clipping refresh.
       !> Apply density boundary conditions
       call this%bcs_density%apply(rho, time)
 
@@ -425,6 +434,20 @@ contains
     call neko_scratch_registry%relinquish_field(temp_indices)
 
   end subroutine fluid_scheme_compressible_ns_step
+
+  !> Advance the Euler IDP path.
+  !> @param this The fluid scheme object.
+  !> @param time Current simulation time state.
+  subroutine fluid_scheme_compressible_ns_step_euler_idp(this, time)
+    class(fluid_scheme_compressible_ns_t), intent(inout) :: this
+    type(time_state_t), intent(in) :: time
+
+    ! IDP in progress: Replace this legacy Laplacian advance with the IDP step.
+    call this%compressible_rhs%step(this%rho, this%m_x, this%m_y, this%m_z, &
+         this%E, this%p, this%u, this%v, this%w, this%Ax, this%Ax_stress, &
+         this%c_Xh, this%gs_Xh, this%h, this%artificial_visc, this%mu, &
+         this%kappa, this%bcs_vel, time, this%rk_scheme, time%dt)
+  end subroutine fluid_scheme_compressible_ns_step_euler_idp
 
   !> Set up boundary conditions for the fluid scheme
   !> @param this The fluid scheme object

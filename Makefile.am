@@ -159,6 +159,10 @@ EXTRA_DIST = \
 	tests/integration/tests/test_cylinder/reflog1_opencl_sp.csv\
 	tests/integration/tests/test_cylinder/reflog2_opencl_dp.csv\
 	tests/integration/tests/test_cylinder/reflog2_opencl_sp.csv\
+	tests/integration/tests/test_euler_idp/test_euler_idp.py\
+	tests/integration/tests/test_euler_idp/euler_idp_baseline.case\
+	tests/integration/tests/test_euler_idp/euler_idp_baseline.f90\
+	tests/integration/tests/test_euler_idp/baselines.json\
 	patches/nvhpc_bge.patch\
 	patches/json-fortran71.patch\
 	patches/cce_stack.patch\

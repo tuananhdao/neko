@@ -294,6 +294,15 @@ contains
     ! Setup fluid scheme
     !
     call json_get(this%params, 'case.fluid.scheme', string_val)
+    logical_val = .false.
+    if (this%params%valid_path( &
+         'case.numerics.euler_idp.enabled')) then
+       call json_get(this%params, &
+            'case.numerics.euler_idp.enabled', logical_val)
+    end if
+    if (logical_val .and. trim(string_val) .ne. 'compressible') then
+       call neko_error('Euler IDP requires case.fluid.scheme = compressible')
+    end if
     call fluid_scheme_base_factory(this%fluid, trim(string_val))
 
     call json_get_or_lookup(this%params, 'case.numerics.polynomial_order', lx)

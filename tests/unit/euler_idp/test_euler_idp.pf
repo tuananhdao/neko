@@ -1,0 +1,193 @@
+module test_euler_idp
+  use mpi
+  use pfunit
+  use num_types, only : rp
+  use pfunit_comm_utils, only : comm_init_test, comm_free_test
+  use json_module, only : json_file
+  use euler_idp, only : euler_idp_t
+  use compressible_ops_cpu, only : &
+       compressible_ops_cpu_conserved_to_primitive, &
+       compressible_ops_cpu_state_status_message, EULER_STATE_OK, &
+       EULER_STATE_INVALID_GAMMA, EULER_STATE_INVALID_DENSITY, &
+       EULER_STATE_INVALID_INTERNAL_ENERGY, &
+       EULER_STATE_NONFINITE_CONSERVED
+  use, intrinsic :: ieee_arithmetic, only : ieee_value, ieee_quiet_nan
+  implicit none
+
+  @TestCase
+  type, extends(MPITestCase) :: test_euler_idp_case
+   contains
+     procedure :: setUp
+     procedure :: tearDown
+  end type test_euler_idp_case
+
+contains
+
+  subroutine setUp(this)
+    class(test_euler_idp_case), intent(inout) :: this
+
+    call comm_init_test(this%getMpiCommunicator())
+  end subroutine setUp
+
+  subroutine tearDown(this)
+    class(test_euler_idp_case), intent(inout) :: this
+
+    call comm_free_test()
+  end subroutine tearDown
+
+  @test(npes=[1,2])
+  subroutine test_valid_primitive_conversion(this)
+    class(test_euler_idp_case), intent(inout) :: this
+    integer, parameter :: n = 2
+    real(kind=rp) :: rho(n), mx(n), my(n), mz(n), energy(n)
+    real(kind=rp) :: energy_before(n), rho_p(n), u(n), v(n), w(n)
+    real(kind=rp) :: p(n), sound(n), q(n), expected_q(n), tolerance
+    integer :: status(n)
+
+    tolerance = 100.0_rp * epsilon(1.0_rp)
+    rho = [1.0_rp, 2.0_rp]
+    mx = [2.0_rp, -1.0_rp]
+    my = [0.5_rp, 0.0_rp]
+    mz = [0.0_rp, 1.0_rp]
+    expected_q = [3.0_rp, 5.0_rp]
+    energy = expected_q + 0.5_rp * (mx**2 + my**2 + mz**2) / rho
+    energy_before = energy
+
+    call compressible_ops_cpu_conserved_to_primitive(rho, mx, my, mz, &
+         energy, 1.4_rp, 1.0e-12_rp, 1.0e-12_rp, rho_p, u, v, w, &
+         p, sound, q, status, n)
+
+    @assertEqual([EULER_STATE_OK, EULER_STATE_OK], status)
+    @assertEqual(rho, rho_p, tolerance=tolerance)
+    @assertEqual(mx / rho, u, tolerance=tolerance)
+    @assertEqual(my / rho, v, tolerance=tolerance)
+    @assertEqual(mz / rho, w, tolerance=tolerance)
+    @assertEqual(expected_q, q, tolerance=tolerance)
+    @assertEqual(0.4_rp * expected_q, p, tolerance=tolerance)
+    @assertEqual(sqrt(1.4_rp * p / rho), sound, tolerance=tolerance)
+    @assertEqual(energy_before, energy, tolerance=tolerance)
+  end subroutine test_valid_primitive_conversion
+
+  @test(npes=[1,2])
+  subroutine test_density_floor_and_near_vacuum(this)
+    class(test_euler_idp_case), intent(inout) :: this
+    real(kind=rp) :: rho(2), mx(2), my(2), mz(2), energy(2)
+    real(kind=rp) :: rho_p(2), u(2), v(2), w(2), p(2), sound(2), q(2)
+    integer :: status(2)
+
+    rho = [1.0e-12_rp, 1.0e-14_rp]
+    mx = 0.0_rp
+    my = 0.0_rp
+    mz = 0.0_rp
+    energy = 2.0_rp
+
+    call compressible_ops_cpu_conserved_to_primitive(rho, mx, my, mz, &
+         energy, 1.4_rp, 1.0e-12_rp, 1.0e-12_rp, rho_p, u, v, w, &
+         p, sound, q, status, 2)
+
+    @assertEqual(EULER_STATE_OK, status(1))
+    @assertEqual(EULER_STATE_INVALID_DENSITY, status(2))
+    @assertEqual(0.0_rp, u(2), tolerance=epsilon(1.0_rp))
+    @assertEqual(0.0_rp, p(2), tolerance=epsilon(1.0_rp))
+    @assertEqual(2.0_rp, energy(2), tolerance=epsilon(1.0_rp))
+  end subroutine test_density_floor_and_near_vacuum
+
+  @test(npes=[1,2])
+  subroutine test_high_kinetic_energy_state(this)
+    class(test_euler_idp_case), intent(inout) :: this
+    real(kind=rp) :: rho(2), mx(2), my(2), mz(2), energy(2)
+    real(kind=rp) :: rho_p(2), u(2), v(2), w(2), p(2), sound(2), q(2)
+    real(kind=rp) :: kinetic
+    integer :: status(2)
+
+    rho = 1.0_rp
+    ! Keep the kinetic energy much larger than q while retaining q in SP.
+    mx = 1.0e2_rp
+    my = 0.0_rp
+    mz = 0.0_rp
+    kinetic = 0.5_rp * mx(1)**2
+    energy = [kinetic + 2.0_rp, kinetic + 0.5_rp]
+
+    call compressible_ops_cpu_conserved_to_primitive(rho, mx, my, mz, &
+         energy, 1.4_rp, 1.0e-12_rp, 1.0_rp, rho_p, u, v, w, p, &
+         sound, q, status, 2)
+
+    @assertEqual(EULER_STATE_OK, status(1))
+    @assertEqual(EULER_STATE_INVALID_INTERNAL_ENERGY, status(2))
+    @assertEqual(2.0_rp, q(1), tolerance=1.0e-5_rp)
+    @assertEqual(0.8_rp, p(1), tolerance=1.0e-5_rp)
+    @assertEqual(0.5_rp, q(2), tolerance=1.0e-5_rp)
+    @assertEqual(0.0_rp, p(2), tolerance=epsilon(1.0_rp))
+    @assertEqual(kinetic + 0.5_rp, energy(2), tolerance=1.0e-5_rp)
+  end subroutine test_high_kinetic_energy_state
+
+  @test(npes=[1,2])
+  subroutine test_invalid_gamma_and_nonfinite_state(this)
+    class(test_euler_idp_case), intent(inout) :: this
+    real(kind=rp) :: rho(1), mx(1), my(1), mz(1), energy(1)
+    real(kind=rp) :: rho_p(1), u(1), v(1), w(1), p(1), sound(1), q(1)
+    integer :: status(1)
+    character(len=48) :: status_message
+
+    rho = 1.0_rp
+    mx = 0.0_rp
+    my = 0.0_rp
+    mz = 0.0_rp
+    energy = 2.0_rp
+
+    call compressible_ops_cpu_conserved_to_primitive(rho, mx, my, mz, &
+         energy, 1.0_rp, 1.0e-12_rp, 1.0e-12_rp, rho_p, u, v, w, &
+         p, sound, q, status, 1)
+    @assertEqual(EULER_STATE_INVALID_GAMMA, status(1))
+
+    mx(1) = ieee_value(0.0_rp, ieee_quiet_nan)
+    call compressible_ops_cpu_conserved_to_primitive(rho, mx, my, mz, &
+         energy, 1.4_rp, 1.0e-12_rp, 1.0e-12_rp, rho_p, u, v, w, &
+         p, sound, q, status, 1)
+    @assertEqual(EULER_STATE_NONFINITE_CONSERVED, status(1))
+    status_message = compressible_ops_cpu_state_status_message(status(1))
+    @assertEqual('non-finite conserved state', trim(status_message))
+
+    mx = 0.0_rp
+    rho(1) = ieee_value(0.0_rp, ieee_quiet_nan)
+    call compressible_ops_cpu_conserved_to_primitive(rho, mx, my, mz, &
+         energy, 1.4_rp, 1.0e-12_rp, 1.0e-12_rp, rho_p, u, v, w, &
+         p, sound, q, status, 1)
+    @assertEqual(EULER_STATE_INVALID_DENSITY, status(1))
+    status_message = compressible_ops_cpu_state_status_message(status(1))
+    @assertEqual('density non-finite or below floor', trim(status_message))
+
+    rho = 1.0_rp
+    energy(1) = ieee_value(0.0_rp, ieee_quiet_nan)
+    call compressible_ops_cpu_conserved_to_primitive(rho, mx, my, mz, &
+         energy, 1.4_rp, 1.0e-12_rp, 1.0e-12_rp, rho_p, u, v, w, &
+         p, sound, q, status, 1)
+    @assertEqual(EULER_STATE_NONFINITE_CONSERVED, status(1))
+  end subroutine test_invalid_gamma_and_nonfinite_state
+
+  @test(npes=[1,2])
+  subroutine test_configuration_reinitialisation(this)
+    class(test_euler_idp_case), intent(inout) :: this
+    type(json_file) :: params
+    type(euler_idp_t) :: idp
+
+    call params%load_from_string('{}')
+    call idp%init(params)
+    @assertFalse(idp%enabled)
+    call params%destroy()
+
+    call params%load_from_string( &
+         '{"case":{"numerics":{"euler_idp":{"enabled":true}}}}')
+    call idp%init(params)
+    @assertTrue(idp%enabled)
+    call params%destroy()
+
+    call params%load_from_string('{}')
+    call idp%init(params)
+    @assertFalse(idp%enabled)
+    call idp%free()
+    @assertFalse(idp%enabled)
+    call params%destroy()
+  end subroutine test_configuration_reinitialisation
+
+end module test_euler_idp

@@ -5,6 +5,7 @@ __pycache__
 *.nmsh
 logs/
 tests/**/*.case
+!tests/test_euler_idp/euler_idp_baseline.case
 **/genmeshbox*
 **/*.csv
 !tests/test_scalar_restart/reference_*.csv

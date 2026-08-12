@@ -235,6 +235,34 @@
               }
             }
           }
+        },
+        {
+          "if": {
+            "properties": {
+              "numerics": {
+                "properties": {
+                  "euler_idp": {
+                    "properties": {
+                      "enabled": {"const": true}
+                    },
+                    "required": ["enabled"]
+                  }
+                },
+                "required": ["euler_idp"]
+              }
+            },
+            "required": ["numerics"]
+          },
+          "then": {
+            "properties": {
+              "fluid": {
+                "properties": {
+                  "scheme": {"const": "compressible"}
+                },
+                "required": ["scheme"]
+              }
+            }
+          }
         }
       ],
       "additionalProperties": true

@@ -138,6 +138,76 @@ def test_rejects_integer_encoding_in_real_array(tmp_path):
     assert result.returncode != 0
 
 
+def test_allows_euler_idp_enabled(tmp_path):
+    with (EXAMPLES_DIR / "euler_2d_smooth" / "euler_2d_smooth.case").open(
+        encoding="utf-8"
+    ) as handle:
+        data = json5.load(handle)
+    data["case"]["numerics"]["euler_idp"] = {"enabled": True}
+
+    case_file = tmp_path / "valid.case"
+    case_file.write_text(json.dumps(data), encoding="utf-8")
+    result = subprocess.run(
+        [sys.executable, str(VALIDATOR), str(case_file)],
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 0, result.stdout + result.stderr
+
+
+def test_rejects_non_boolean_euler_idp_enabled(tmp_path):
+    with (EXAMPLES_DIR / "euler_2d_smooth" / "euler_2d_smooth.case").open(
+        encoding="utf-8"
+    ) as handle:
+        data = json5.load(handle)
+    data["case"]["numerics"]["euler_idp"] = {"enabled": 1}
+
+    case_file = tmp_path / "invalid.case"
+    case_file.write_text(json.dumps(data), encoding="utf-8")
+    result = subprocess.run(
+        [sys.executable, str(VALIDATOR), str(case_file)],
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode != 0
+
+
+def test_rejects_unknown_euler_idp_property(tmp_path):
+    with (EXAMPLES_DIR / "euler_2d_smooth" / "euler_2d_smooth.case").open(
+        encoding="utf-8"
+    ) as handle:
+        data = json5.load(handle)
+    data["case"]["numerics"]["euler_idp"] = {"future_option": True}
+
+    case_file = tmp_path / "invalid.case"
+    case_file.write_text(json.dumps(data), encoding="utf-8")
+    result = subprocess.run(
+        [sys.executable, str(VALIDATOR), str(case_file)],
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode != 0
+
+
+def test_rejects_enabled_euler_idp_for_pnpn(tmp_path):
+    with (EXAMPLES_DIR / "tgv" / "tgv.case").open(encoding="utf-8") as handle:
+        data = json5.load(handle)
+    data["case"]["numerics"]["euler_idp"] = {"enabled": True}
+
+    case_file = tmp_path / "invalid.case"
+    case_file.write_text(json.dumps(data), encoding="utf-8")
+    result = subprocess.run(
+        [sys.executable, str(VALIDATOR), str(case_file)],
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode != 0
+
+
 @pytest.mark.parametrize(
     "boundary_type",
     ["outflow", "normal_outflow", "outflow+user", "normal_outflow+user"],
