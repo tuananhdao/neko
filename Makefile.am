@@ -19,6 +19,18 @@ endif
 CLEANFILES = *.mod\
 	     *.smod
 
+dev:
+	@expected_prefix="$(abs_top_srcdir)/install"; \
+	if test "$(prefix)" != "$$expected_prefix"; then \
+	  echo "Development prefix mismatch:"; \
+	  echo "  configured: $(prefix)"; \
+	  echo "  expected:   $$expected_prefix"; \
+	  echo "Reconfigure with: pixi run build-neko-cpu dp"; \
+	  exit 1; \
+	fi
+	$(MAKE) -j all
+	$(MAKE) install
+
 
 bin_SCRIPTS = makeneko
 
@@ -29,6 +41,7 @@ man_MANS = \
 EXTRA_DIST = \
 	makeneko.in\
 	regen.sh\
+	contrib/check_neko_development_environment.sh\
 	flinter_rc.yml\
 	tests/bench/ax/setup.f90\
 	tests/bench/ax/Makefile\
@@ -174,11 +187,11 @@ check-local: lint
 endif
 
 if ENABLE_PFUNIT
-.PHONY: refresh-unit-test-makefiles
+.PHONY: dev refresh-unit-test-makefiles
 refresh-unit-test-makefiles:
 	$(MAKE) -C tests/unit refresh-unit-test-makefiles-local
 else
-.PHONY: refresh-unit-test-makefiles
+.PHONY: dev refresh-unit-test-makefiles
 refresh-unit-test-makefiles:
 	@echo "pFUnit support is disabled: no unit-test Makefiles to refresh."
 endif
