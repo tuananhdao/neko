@@ -58,6 +58,7 @@ module euler_idp_cpu
   use comm, only : NEKO_COMM, MPI_REAL_PRECISION, pe_rank
   use utils, only : neko_error
   use logger, only : LOG_SIZE
+  use profiler, only : profiler_start_region, profiler_end_region
   implicit none
   private
 
@@ -420,6 +421,7 @@ contains
        call neko_error('Euler IDP CPU object is not initialised')
     end if
 
+    call profiler_start_region('Euler IDP high-order')
     call euler_idp_cpu_primitives(this, rho, m_x, m_y, m_z, energy, &
          gamma, internal_energy_floor, 'high-order state')
 
@@ -456,6 +458,7 @@ contains
 
     end do
 
+    call profiler_end_region('Euler IDP high-order')
   end subroutine euler_idp_cpu_evaluate_high_order
 
   !> Update symmetric graph viscosity, bar states, and the graph CFL rate.
@@ -479,6 +482,7 @@ contains
        call neko_error('Euler IDP graph is not initialised')
     end if
 
+    call profiler_start_region('Euler IDP graph viscosity')
     this%viscosity_sum%x = 0.0_rp
     do edge = 1, this%graph%n_edges
        associate(a => this%graph%left(:,edge), &
@@ -563,6 +567,7 @@ contains
     else
        this%maximum_graph_timestep = huge(1.0_rp)
     end if
+    call profiler_end_region('Euler IDP graph viscosity')
   end subroutine euler_idp_cpu_update_graph_viscosity
 
   !> Evaluate the conservative low-order graph residual.
@@ -580,6 +585,7 @@ contains
     real(kind=rp) :: difference, left_value, right_value
     integer :: component, edge
 
+    call profiler_start_region('Euler IDP low-order graph')
     call euler_idp_cpu_primitives(this, rho, m_x, m_y, m_z, energy, &
          gamma, internal_energy_floor, 'low-order state')
     if (.not. present(graph_viscosity_current)) then
@@ -650,6 +656,7 @@ contains
             this%low_assembled_residual(component)%x * coef%Binv
     end do
 
+    call profiler_end_region('Euler IDP low-order graph')
   end subroutine euler_idp_cpu_evaluate_low_order
 
   !> Return the exact maximum nodal graph CFL for a timestep.
@@ -684,6 +691,7 @@ contains
        call neko_error('Euler IDP graph is not initialised')
     end if
 
+    call profiler_start_region('Euler IDP bounds')
     this%density_lower_bound%x = rho%x
     this%density_upper_bound%x = rho%x
     if (this%relax_density_bounds) then
@@ -823,6 +831,7 @@ contains
           this%density_upper_bound%x(i,1,1,1) = relaxed_upper
        end do
     end if
+    call profiler_end_region('Euler IDP bounds')
   end subroutine euler_idp_cpu_compute_bounds
 
   !> Form a high-order Forward Euler candidate without changing the input.
@@ -866,6 +875,7 @@ contains
          gamma, internal_energy_floor, diagnostics, &
          present(entropy_viscosity_fraction), graph_wave_speed)
 
+    call profiler_start_region('Euler IDP timestep limits')
     diagnostics%max_graph_cfl = this%graph_cfl(dt)
     diagnostics%min_convex_weight = 1.0_rp - diagnostics%max_graph_cfl
     if (diagnostics%max_graph_cfl .gt. 1.0_rp + 32.0_rp * &
@@ -919,6 +929,7 @@ contains
        end if
        call neko_error(trim(message))
     end if
+    call profiler_end_region('Euler IDP timestep limits')
 
     this%low_candidate(1)%x = rho%x - dt * &
          this%low_assembled_residual(1)%x
@@ -980,6 +991,7 @@ contains
 
     ! Reconstruct the conservative low-to-high inviscid correction on the
     ! coordinate-neighbour graph.
+    call profiler_start_region('Euler IDP reconstruction')
     directional_error_local = 0.0_rp
     do component = 1, EULER_IDP_NCOMP
        call euler_idp_cpu_flux(this, component, m_x, m_y, m_z, energy)
@@ -1049,6 +1061,7 @@ contains
        call neko_error('Euler IDP directional correction reconstruction ' // &
             'failed')
     end if
+    call profiler_end_region('Euler IDP reconstruction')
 
     ! The low-order candidate is the base state for every edge correction.
     ! Validate it after the stage-state fluxes have been reconstructed so its
@@ -1077,6 +1090,7 @@ contains
          velocity_bcs, pressure_bcs, gamma, internal_energy_floor, time, &
          'limited candidate after boundary conditions')
 
+    call profiler_start_region('Euler IDP diagnostics')
     local_bound_violation = 0.0_rp
     local_scale = 1.0_rp
     if (rho%size() .gt. 0) then
@@ -1142,6 +1156,7 @@ contains
     diagnostics%min_internal_energy = global_minimum(2)
     diagnostics%min_pressure = global_minimum(3)
     diagnostics%min_specific_entropy = global_minimum(4)
+    call profiler_end_region('Euler IDP diagnostics')
   end subroutine euler_idp_cpu_forward_euler
 
   !> Advance with Forward Euler or SSPRK3 using the limited Euler map.
@@ -1251,6 +1266,7 @@ contains
     integer :: direction, edge, component, ierr
     logical :: density_limited, energy_limited, entropy_limited
 
+    call profiler_start_region('Euler IDP vector limiter')
     local_minimum = 1.0_rp
     local_count = 0
     do edge = 1, this%graph%n_edges
@@ -1319,6 +1335,7 @@ contains
     diagnostics%density_limited_edges = global_count(3)
     diagnostics%internal_energy_limited_edges = global_count(4)
     diagnostics%entropy_limited_edges = global_count(5)
+    call profiler_end_region('Euler IDP vector limiter')
   end subroutine euler_idp_cpu_compute_limiter
 
   !> Assemble the limited state as its invariant-domain convex combination.
@@ -1328,6 +1345,7 @@ contains
     real(kind=rp) :: degree, weight, auxiliary
     integer :: component, direction, edge
 
+    call profiler_start_region('Euler IDP correction')
     do component = 1, EULER_IDP_NCOMP
        this%limited_candidate(component)%x = 0.0_rp
        do edge = 1, this%graph%n_edges
@@ -1362,6 +1380,7 @@ contains
        end do
        call gs%op(this%limited_candidate(component), GS_OP_ADD)
     end do
+    call profiler_end_region('Euler IDP correction')
   end subroutine euler_idp_cpu_apply_correction
 
   !> Commit the checked limited Forward Euler candidate.
@@ -1388,6 +1407,7 @@ contains
     character(len=*), intent(in) :: label
     integer :: n
 
+    call profiler_start_region('Euler IDP boundary')
     n = rho%size()
     if (present(time)) then
        call density_bcs%apply(rho, time = time, strong = .true.)
@@ -1418,6 +1438,7 @@ contains
 
     call euler_idp_cpu_primitives(this, rho, m_x, m_y, m_z, energy, gamma, &
          internal_energy_floor, label)
+    call profiler_end_region('Euler IDP boundary')
   end subroutine euler_idp_cpu_apply_boundary_conditions
 
   !> Reconstruct primitive fields from one conserved state.
@@ -1430,6 +1451,7 @@ contains
     character(len=LOG_SIZE) :: message
     integer :: first_invalid, n
 
+    call profiler_start_region('Euler IDP primitives')
     n = rho%size()
     call compressible_ops_cpu_conserved_to_primitive(rho%x, m_x%x, m_y%x, &
          m_z%x, energy%x, gamma, internal_energy_floor, &
@@ -1443,6 +1465,7 @@ contains
             first_invalid, ', status ', this%state_status(first_invalid)
        call neko_error(trim(message))
     end if
+    call profiler_end_region('Euler IDP primitives')
   end subroutine euler_idp_cpu_primitives
 
   !> Construct one Cartesian Euler flux vector.
