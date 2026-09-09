@@ -826,7 +826,7 @@ contains
     call profiler_end_region('Euler IDP bounds')
   end subroutine euler_idp_cpu_compute_bounds
 
-  !> Form a high-order Forward Euler candidate without changing the input.
+  !> Form a complete limited Forward Euler update without changing the input.
   subroutine euler_idp_cpu_forward_euler(this, rho, m_x, m_y, m_z, energy, &
        coef, gs, gamma, internal_energy_floor, dt, time, diagnostics, stage, &
        entropy_viscosity_fraction, graph_wave_speed)
