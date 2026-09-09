@@ -30,7 +30,7 @@
 ! ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
 ! POSSIBILITY OF SUCH DAMAGE.
 !
-!> CPU high-order candidate for the Euler IDP solver.
+!> CPU implementation of the Euler IDP solver.
 module euler_idp_cpu
   use, intrinsic :: ieee_arithmetic, only : ieee_is_finite
   use mpi_f08, only : MPI_Allreduce, MPI_INTEGER, MPI_MAX, MPI_MIN, MPI_SUM
@@ -65,7 +65,7 @@ module euler_idp_cpu
   implicit none
   private
 
-  !> Persistent work fields for the CPU high-order Euler candidate.
+  !> Persistent work fields for the CPU Euler IDP implementation.
   type, public, extends(euler_idp_backend_t) :: euler_idp_cpu_t
      logical :: periodic_graph = .false.
      logical :: low_order_only = .false.
@@ -77,7 +77,6 @@ module euler_idp_cpu
      type(euler_gll_graph_t) :: graph
      type(field_t) :: local_residual(EULER_IDP_NCOMP)
      type(field_t) :: low_local_residual(EULER_IDP_NCOMP)
-     type(field_t) :: low_assembled_residual(EULER_IDP_NCOMP)
      type(field_t) :: low_candidate(EULER_IDP_NCOMP)
      type(field_t) :: saved_state(EULER_IDP_NCOMP)
      type(field_t) :: viscosity_sum
@@ -151,10 +150,6 @@ contains
     call this%free()
 
     do component = 1, EULER_IDP_NCOMP
-       write(name, '(A,I0)') 'euler_idp_low_local_', component
-       call this%low_local_residual(component)%init(dof, trim(name))
-       write(name, '(A,I0)') 'euler_idp_low_assembled_', component
-       call this%low_assembled_residual(component)%init(dof, trim(name))
        write(name, '(A,I0)') 'euler_idp_low_candidate_', component
        call this%low_candidate(component)%init(dof, trim(name))
     end do
@@ -292,6 +287,14 @@ contains
     end if
     this%density_relaxation_mass = global_mass
     this%periodic_graph = this%graph%periodic_facets_covered(coef)
+    do component = 1, EULER_IDP_NCOMP
+       call this%low_local_residual(component)%free()
+       if (.not. this%periodic_graph .or. &
+            diagnostics_level .eq. EULER_IDP_DIAGNOSTICS_FULL) then
+          write(name, '(A,I0)') 'euler_idp_low_local_', component
+          call this%low_local_residual(component)%init(coef%dof, trim(name))
+       end if
+    end do
     allocate(this%edge_viscosity(this%graph%n_edges))
     allocate(this%correction_flux(EULER_IDP_NCOMP, this%graph%n_edges))
     this%edge_viscosity = 0.0_rp
@@ -348,7 +351,6 @@ contains
     do component = 1, EULER_IDP_NCOMP
        call this%local_residual(component)%free()
        call this%low_local_residual(component)%free()
-       call this%low_assembled_residual(component)%free()
        call this%low_candidate(component)%free()
        call this%saved_state(component)%free()
     end do
@@ -538,7 +540,7 @@ contains
          graph_wave_speed)
   end subroutine euler_idp_cpu_prepare_stage
 
-  !> Evaluate the conservative low-order graph residual.
+  !> Evaluate the conservative low-order graph residual into candidate storage.
   subroutine euler_idp_cpu_evaluate_low_order(this, rho, m_x, m_y, m_z, &
        energy, coef, gs, gamma, internal_energy_floor, &
        diagnostics, directional_error)
@@ -552,10 +554,13 @@ contains
     real(kind=rp) :: difference, left_value, right_value
     real(kind=rp) :: left_flux_value, right_flux_value, flux_difference
     integer :: component, edge
+    logical :: need_local_residual
 
     call profiler_start_region('Euler IDP low-order graph')
 
     directional_error = 0.0_rp
+    need_local_residual = .not. this%periodic_graph .or. &
+         this%diagnostics_level .eq. EULER_IDP_DIAGNOSTICS_FULL
     do component = 1, EULER_IDP_NCOMP
        call euler_idp_cpu_flux(this, component, m_x, m_y, m_z, energy)
        if (this%diagnostics_level .eq. EULER_IDP_DIAGNOSTICS_FULL) then
@@ -568,16 +573,16 @@ contains
                this%element_boundary_flux)
           call profiler_end_region('Euler IDP high-order')
        end if
-       call this%graph%local_flux_divergence( &
-            this%low_local_residual(component)%x, this%flux_x%x, &
-            this%flux_y%x, this%flux_z%x)
-       ! The supported periodic assembly cancels the SBP boundary terms, so
-       ! the assembled residual can be formed directly as
-       ! 2*d_ij*(U_i-bar_U_ij), exposing the convex IDP update without an
-       ! additional gather-scatter. Keep the physical element residual
-       ! separately for coarse-face compatibility diagnostics.
+       if (need_local_residual) then
+          call this%graph%local_flux_divergence( &
+               this%low_local_residual(component)%x, this%flux_x%x, &
+               this%flux_y%x, this%flux_z%x)
+       end if
+       ! The periodic graph cancels the SBP boundary terms, so assemble the
+       ! invariant low-order residual directly in storage that becomes U^L.
+       ! The nonperiodic path retains the element-local reference residual.
        if (this%periodic_graph) then
-          this%low_assembled_residual(component)%x = 0.0_rp
+          this%low_candidate(component)%x = 0.0_rp
        end if
        do edge = 1, this%graph%n_edges
           associate(a => this%graph%left(:,edge), &
@@ -597,25 +602,27 @@ contains
                  this%flux_y%x(b(1),b(2),b(3),b(4)) + coefficient(3) * &
                  this%flux_z%x(b(1),b(2),b(3),b(4))
             flux_difference = right_flux_value - left_flux_value
-            this%low_local_residual(component)%x( &
-                 a(1),a(2),a(3),a(4)) = &
-                 this%low_local_residual(component)%x( &
-                 a(1),a(2),a(3),a(4)) - &
-                 this%edge_viscosity(edge) * difference
-            this%low_local_residual(component)%x( &
-                 b(1),b(2),b(3),b(4)) = &
-                 this%low_local_residual(component)%x( &
-                 b(1),b(2),b(3),b(4)) + &
-                 this%edge_viscosity(edge) * difference
-            if (this%periodic_graph) then
-               this%low_assembled_residual(component)%x( &
+            if (need_local_residual) then
+               this%low_local_residual(component)%x( &
                     a(1),a(2),a(3),a(4)) = &
-                    this%low_assembled_residual(component)%x( &
+                    this%low_local_residual(component)%x( &
+                    a(1),a(2),a(3),a(4)) - &
+                    this%edge_viscosity(edge) * difference
+               this%low_local_residual(component)%x( &
+                    b(1),b(2),b(3),b(4)) = &
+                    this%low_local_residual(component)%x( &
+                    b(1),b(2),b(3),b(4)) + &
+                    this%edge_viscosity(edge) * difference
+            end if
+            if (this%periodic_graph) then
+               this%low_candidate(component)%x( &
+                    a(1),a(2),a(3),a(4)) = &
+                    this%low_candidate(component)%x( &
                     a(1),a(2),a(3),a(4)) + &
                     flux_difference - this%edge_viscosity(edge) * difference
-               this%low_assembled_residual(component)%x( &
+               this%low_candidate(component)%x( &
                     b(1),b(2),b(3),b(4)) = &
-                    this%low_assembled_residual(component)%x( &
+                    this%low_candidate(component)%x( &
                     b(1),b(2),b(3),b(4)) + &
                     flux_difference + this%edge_viscosity(edge) * difference
             end if
@@ -634,14 +641,14 @@ contains
             directional_error(component))
        call profiler_end_region('Euler IDP reconstruction')
        if (.not. this%periodic_graph) then
-          this%low_assembled_residual(component)%x = &
+          this%low_candidate(component)%x = &
                this%low_local_residual(component)%x
        end if
        call profiler_start_region('Euler IDP gather-scatter')
-       call gs%op(this%low_assembled_residual(component), GS_OP_ADD)
+       call gs%op(this%low_candidate(component), GS_OP_ADD)
        call profiler_end_region('Euler IDP gather-scatter')
-       this%low_assembled_residual(component)%x = &
-            this%low_assembled_residual(component)%x * coef%Binv
+       this%low_candidate(component)%x = &
+            this%low_candidate(component)%x * coef%Binv
     end do
 
     call profiler_end_region('Euler IDP low-order graph')
@@ -920,7 +927,7 @@ contains
                m_z%x(i,1,1,1), energy%x(i,1,1,1)]
           do component = 1, EULER_IDP_NCOMP
              residual(component) = &
-                  this%low_assembled_residual(component)%x(i,1,1,1)
+                  this%low_candidate(component)%x(i,1,1,1)
           end do
           local_floor_timestep = min(local_floor_timestep, &
                euler_idp_internal_energy_timestep(state, residual, &
@@ -953,16 +960,11 @@ contains
     call profiler_end_region('Euler IDP timestep limits')
 
     call profiler_start_region('Euler IDP low update')
-    this%low_candidate(1)%x = rho%x - dt * &
-         this%low_assembled_residual(1)%x
-    this%low_candidate(2)%x = m_x%x - dt * &
-         this%low_assembled_residual(2)%x
-    this%low_candidate(3)%x = m_y%x - dt * &
-         this%low_assembled_residual(3)%x
-    this%low_candidate(4)%x = m_z%x - dt * &
-         this%low_assembled_residual(4)%x
-    this%low_candidate(5)%x = energy%x - dt * &
-         this%low_assembled_residual(5)%x
+    this%low_candidate(1)%x = rho%x - dt * this%low_candidate(1)%x
+    this%low_candidate(2)%x = m_x%x - dt * this%low_candidate(2)%x
+    this%low_candidate(3)%x = m_y%x - dt * this%low_candidate(3)%x
+    this%low_candidate(4)%x = m_z%x - dt * this%low_candidate(4)%x
+    this%low_candidate(5)%x = energy%x - dt * this%low_candidate(5)%x
     if (scalar_density_mode) then
        ! User-defined scalar problems are embedded in density. The remaining
        ! conservative fields only carry the prescribed scalar flux and are
