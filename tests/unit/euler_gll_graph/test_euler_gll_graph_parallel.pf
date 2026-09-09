@@ -83,8 +83,14 @@ contains
     real(kind=rp) :: low(lx_test,lx_test,lx_test,1)
     real(kind=rp) :: high(lx_test,lx_test,lx_test,1)
     real(kind=rp) :: correction(lx_test,lx_test,lx_test,1)
+    real(kind=rp) :: vector_flux_x(2,lx_test,lx_test,lx_test,1)
+    real(kind=rp) :: vector_flux_y(2,lx_test,lx_test,lx_test,1)
+    real(kind=rp) :: vector_flux_z(2,lx_test,lx_test,lx_test,1)
     real(kind=rp), allocatable :: edge_flux(:)
+    real(kind=rp), allocatable :: vector_edge_flux(:,:)
+    real(kind=rp) :: vector_error(2)
     real(kind=rp) :: compatibility_error, correction_error, error_scale
+    real(kind=rp) :: vector_correction_error
 
     call build_warped_hex_fixture(msh, Xh, dof, gs, coef)
     call graph%init(coef, gs)
@@ -106,6 +112,21 @@ contains
     @assertEqual(0.0_rp, compatibility_error, tolerance = 1.0e-12_rp)
     @assertEqual(0.0_rp, correction_error, tolerance = 1.0e-11_rp * error_scale)
 
+    vector_flux_x(1,:,:,:,:) = flux_x
+    vector_flux_y(1,:,:,:,:) = flux_y
+    vector_flux_z(1,:,:,:,:) = flux_z
+    vector_flux_x(2,:,:,:,:) = -0.5_rp * flux_x
+    vector_flux_y(2,:,:,:,:) = -0.5_rp * flux_y
+    vector_flux_z(2,:,:,:,:) = -0.5_rp * flux_z
+    allocate(vector_edge_flux(2, graph%n_edges))
+    call graph%directional_correction_flux_vector(vector_edge_flux, &
+         vector_flux_x, vector_flux_y, vector_flux_z, coef, vector_error)
+    vector_correction_error = max( &
+         maxval(abs(vector_edge_flux(1,:) - edge_flux)), &
+         maxval(abs(vector_edge_flux(2,:) + 0.5_rp * edge_flux)))
+    @assertEqual(0.0_rp, vector_correction_error, tolerance = 1.0e-12_rp * error_scale)
+
+    deallocate(vector_edge_flux)
     deallocate(edge_flux)
     call free_warped_hex_fixture(graph, coef, gs, dof, Xh, msh)
   end subroutine test_warped_hex_correction_identity
@@ -163,6 +184,60 @@ contains
     deallocate(edge_flux)
     call free_warped_hex_fixture(graph, coef, gs, dof, Xh, msh)
   end subroutine test_affine_directional_correction
+
+  !> A vector graph traversal must match independent scalar reconstructions.
+  @test(npes=[1])
+  subroutine test_affine_vector_matches_scalar(this)
+    class(test_euler_gll_graph), intent(inout) :: this
+    integer, parameter :: ncomponents = 5
+    type(mesh_t) :: msh
+    type(space_t) :: Xh
+    type(dofmap_t) :: dof
+    type(gs_t) :: gs
+    type(coef_t) :: coef
+    type(euler_gll_graph_t) :: graph
+    real(kind=rp) :: flux_x(ncomponents,lx_test,lx_test,lx_test,1)
+    real(kind=rp) :: flux_y(ncomponents,lx_test,lx_test,lx_test,1)
+    real(kind=rp) :: flux_z(ncomponents,lx_test,lx_test,lx_test,1)
+    real(kind=rp), allocatable :: vector_edge_flux(:,:)
+    real(kind=rp), allocatable :: scalar_edge_flux(:,:)
+    real(kind=rp) :: vector_error(ncomponents)
+    real(kind=rp) :: scalar_error(ncomponents)
+    real(kind=rp) :: compatibility_difference, edge_error, error_scale
+    integer :: component
+
+    call build_affine_hex_fixture(msh, Xh, dof, gs, coef)
+    call graph%init(coef, gs)
+    do component = 1, ncomponents
+       flux_x(component,:,:,:,:) = real(component, rp) * &
+            (1.0_rp + dof%x + dof%y * dof%z)
+       flux_y(component,:,:,:,:) = real(component + 1, rp) * &
+            (dof%y**2 - 0.2_rp * dof%x * dof%z)
+       flux_z(component,:,:,:,:) = real(component + 2, rp) * &
+            (dof%z**3 + 0.3_rp * dof%x * dof%y)
+    end do
+
+    allocate(vector_edge_flux(ncomponents, graph%n_edges))
+    allocate(scalar_edge_flux(ncomponents, graph%n_edges))
+    call graph%directional_correction_flux_vector(vector_edge_flux, &
+         flux_x, flux_y, flux_z, coef, vector_error)
+    do component = 1, ncomponents
+       call graph%directional_correction_flux( &
+            scalar_edge_flux(component,:), flux_x(component,:,:,:,:), &
+            flux_y(component,:,:,:,:), flux_z(component,:,:,:,:), coef, &
+            scalar_error(component))
+    end do
+
+    error_scale = max(1.0_rp, maxval(abs(scalar_edge_flux)))
+    edge_error = maxval(abs(vector_edge_flux - scalar_edge_flux))
+    compatibility_difference = maxval(abs(vector_error - scalar_error))
+    @assertEqual(0.0_rp, edge_error, tolerance = 1.0e-12_rp * error_scale)
+    @assertEqual(0.0_rp, compatibility_difference, tolerance = 1.0e-12_rp)
+
+    deallocate(vector_edge_flux)
+    deallocate(scalar_edge_flux)
+    call free_warped_hex_fixture(graph, coef, gs, dof, Xh, msh)
+  end subroutine test_affine_vector_matches_scalar
 
   !> Build one affine Cartesian hex.
   subroutine build_affine_hex_fixture(msh, Xh, dof, gs, coef)

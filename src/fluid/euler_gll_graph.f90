@@ -80,6 +80,8 @@ module euler_gll_graph
      procedure, pass(this) :: incidence => euler_gll_graph_incidence
      procedure, pass(this) :: directional_correction_flux => &
           euler_gll_graph_directional_correction_flux
+     procedure, pass(this) :: directional_correction_flux_vector => &
+          euler_gll_graph_directional_correction_flux_vector
      procedure, pass(this) :: periodic_facets_covered => &
           euler_gll_graph_periodic_facets_covered
   end type euler_gll_graph_t
@@ -637,58 +639,122 @@ contains
     end if
   end subroutine euler_gll_graph_directional_correction_flux
 
-  !> Reconstruct affine corrections independently on each tensor line.
+  !> Reconstruct multiple conservative corrections in one graph traversal.
+  subroutine euler_gll_graph_directional_correction_flux_vector(this, &
+       edge_values, flux_x, flux_y, flux_z, coef, compatibility_error)
+    class(euler_gll_graph_t), intent(inout) :: this
+    real(kind=rp), intent(out) :: edge_values(:,:)
+    real(kind=rp), intent(in) :: flux_x(:,:,:,:,:)
+    real(kind=rp), intent(in) :: flux_y(:,:,:,:,:)
+    real(kind=rp), intent(in) :: flux_z(:,:,:,:,:)
+    type(coef_t), intent(in) :: coef
+    real(kind=rp), intent(out) :: compatibility_error(:)
+    integer :: component, ncomponents
+
+    call euler_gll_graph_assert_initialized(this)
+    ncomponents = size(edge_values, 1)
+    if (size(edge_values, 2) .ne. this%n_edges .or. &
+         any(shape(flux_x) .ne. [ncomponents, this%lx, this%ly, this%lz, &
+         this%nelv]) .or. any(shape(flux_y) .ne. shape(flux_x)) .or. &
+         any(shape(flux_z) .ne. shape(flux_x)) .or. &
+         size(compatibility_error) .ne. ncomponents) then
+       call neko_error('Incorrect Euler vector correction size')
+    end if
+
+    if (this%affine) then
+       call euler_gll_graph_directional_reconstruct_vector(this, &
+            edge_values, flux_x, flux_y, flux_z, coef, compatibility_error)
+    else
+       do component = 1, ncomponents
+          call this%directional_correction_flux(edge_values(component,:), &
+               flux_x(component,:,:,:,:), flux_y(component,:,:,:,:), &
+               flux_z(component,:,:,:,:), coef, &
+               compatibility_error(component))
+       end do
+    end if
+  end subroutine euler_gll_graph_directional_correction_flux_vector
+
+  !> Map a scalar flux onto the shared affine vector reconstruction.
   subroutine euler_gll_graph_directional_reconstruct(this, edge_values, &
        flux_x, flux_y, flux_z, coef, compatibility_error)
     class(euler_gll_graph_t), intent(inout) :: this
-    real(kind=rp), intent(out) :: edge_values(:)
-    real(kind=rp), intent(in) :: flux_x(:,:,:,:), flux_y(:,:,:,:)
-    real(kind=rp), intent(in) :: flux_z(:,:,:,:)
+    real(kind=rp), intent(out), target, contiguous :: edge_values(:)
+    real(kind=rp), intent(in), target, contiguous :: flux_x(:,:,:,:)
+    real(kind=rp), intent(in), target, contiguous :: flux_y(:,:,:,:)
+    real(kind=rp), intent(in), target, contiguous :: flux_z(:,:,:,:)
     type(coef_t), intent(in) :: coef
     real(kind=rp), intent(out) :: compatibility_error
-    real(kind=rp) :: cumulative, derivative_x, derivative_y, derivative_z
-    real(kind=rp) :: high_residual, line_scale
-    integer :: edge, edge_first, edge_last, e, i, j, k, l
+    real(kind=rp), pointer :: edge_values_vector(:,:)
+    real(kind=rp), pointer :: flux_x_vector(:,:,:,:,:)
+    real(kind=rp), pointer :: flux_y_vector(:,:,:,:,:)
+    real(kind=rp), pointer :: flux_z_vector(:,:,:,:,:)
+    real(kind=rp) :: compatibility_error_vector(1)
+
+    edge_values_vector(1:1,1:this%n_edges) => edge_values
+    flux_x_vector(1:1,1:this%lx,1:this%ly,1:this%lz,1:this%nelv) => flux_x
+    flux_y_vector(1:1,1:this%lx,1:this%ly,1:this%lz,1:this%nelv) => flux_y
+    flux_z_vector(1:1,1:this%lx,1:this%ly,1:this%lz,1:this%nelv) => flux_z
+    call euler_gll_graph_directional_reconstruct_vector(this, &
+         edge_values_vector, flux_x_vector, flux_y_vector, flux_z_vector, &
+         coef, compatibility_error_vector)
+    compatibility_error = compatibility_error_vector(1)
+  end subroutine euler_gll_graph_directional_reconstruct
+
+  !> Reconstruct affine corrections independently on each tensor line.
+  subroutine euler_gll_graph_directional_reconstruct_vector(this, &
+       edge_values, flux_x, flux_y, flux_z, coef, compatibility_error)
+    class(euler_gll_graph_t), intent(inout) :: this
+    real(kind=rp), intent(out) :: edge_values(:,:)
+    real(kind=rp), intent(in) :: flux_x(:,:,:,:,:)
+    real(kind=rp), intent(in) :: flux_y(:,:,:,:,:)
+    real(kind=rp), intent(in) :: flux_z(:,:,:,:,:)
+    type(coef_t), intent(in) :: coef
+    real(kind=rp), intent(out) :: compatibility_error(:)
+    real(kind=rp) :: cumulative(size(edge_values, 1))
+    real(kind=rp) :: derivative_x(size(edge_values, 1))
+    real(kind=rp) :: derivative_y(size(edge_values, 1))
+    real(kind=rp) :: derivative_z(size(edge_values, 1))
+    real(kind=rp) :: high_residual(size(edge_values, 1))
+    real(kind=rp) :: line_scale(size(edge_values, 1))
+    real(kind=rp) :: line_residual(size(edge_values, 1), &
+         max(this%lx, this%ly, this%lz))
+    integer :: edge, edge_first, edge_last, edge_write
+    integer :: e, i, j, k, l
 
     edge_values = 0.0_rp
     compatibility_error = 0.0_rp
 
     ! Reference-x contribution.
-    this%reconstruction_work_1 = 0.0_rp
-    do edge = 1, this%n_edges
-       if (this%direction(edge) .ne. 1) cycle
-       associate(a => this%left(:,edge), b => this%right(:,edge), &
-            c => this%coefficient(:,edge))
-         this%reconstruction_work_1(a(1),a(2),a(3),a(4)) = &
-              this%reconstruction_work_1(a(1),a(2),a(3),a(4)) + &
-              c(1) * flux_x(b(1),b(2),b(3),b(4)) + &
-              c(2) * flux_y(b(1),b(2),b(3),b(4)) + &
-              c(3) * flux_z(b(1),b(2),b(3),b(4))
-         this%reconstruction_work_1(b(1),b(2),b(3),b(4)) = &
-              this%reconstruction_work_1(b(1),b(2),b(3),b(4)) - &
-              c(1) * flux_x(a(1),a(2),a(3),a(4)) - &
-              c(2) * flux_y(a(1),a(2),a(3),a(4)) - &
-              c(3) * flux_z(a(1),a(2),a(3),a(4))
-       end associate
-    end do
     do e = 1, this%nelv
        edge = this%element_edge_start(e) - 1
        do k = 1, this%lz
           do j = 1, this%ly
+             line_residual(:,1:this%lx) = 0.0_rp
              edge_first = edge + 1
-             edge_last = edge + this%lx - 1
+             do i = 1, this%lx - 1
+                edge = edge + 1
+                associate(c => this%coefficient(:,edge))
+                  line_residual(:,i) = line_residual(:,i) + &
+                       c(1) * flux_x(:,i + 1,j,k,e) + &
+                       c(2) * flux_y(:,i + 1,j,k,e) + &
+                       c(3) * flux_z(:,i + 1,j,k,e)
+                  line_residual(:,i + 1) = line_residual(:,i + 1) - &
+                       c(1) * flux_x(:,i,j,k,e) - &
+                       c(2) * flux_y(:,i,j,k,e) - &
+                       c(3) * flux_z(:,i,j,k,e)
+                end associate
+             end do
+             edge_last = edge
              associate(c_first => this%coefficient(:,edge_first), &
                   c_last => this%coefficient(:,edge_last))
-               this%reconstruction_work_1(1,j,k,e) = &
-                    this%reconstruction_work_1(1,j,k,e) - &
-                    c_first(1) * flux_x(1,j,k,e) - &
-                    c_first(2) * flux_y(1,j,k,e) - &
-                    c_first(3) * flux_z(1,j,k,e)
-               this%reconstruction_work_1(this%lx,j,k,e) = &
-                    this%reconstruction_work_1(this%lx,j,k,e) + &
-                    c_last(1) * flux_x(this%lx,j,k,e) + &
-                    c_last(2) * flux_y(this%lx,j,k,e) + &
-                    c_last(3) * flux_z(this%lx,j,k,e)
+               line_residual(:,1) = line_residual(:,1) - &
+                    c_first(1) * flux_x(:,1,j,k,e) - &
+                    c_first(2) * flux_y(:,1,j,k,e) - &
+                    c_first(3) * flux_z(:,1,j,k,e)
+               line_residual(:,this%lx) = line_residual(:,this%lx) + &
+                    c_last(1) * flux_x(:,this%lx,j,k,e) + &
+                    c_last(2) * flux_y(:,this%lx,j,k,e) + &
+                    c_last(3) * flux_z(:,this%lx,j,k,e)
              end associate
              line_scale = 0.0_rp
              do i = 1, this%lx
@@ -697,11 +763,11 @@ contains
                 derivative_z = 0.0_rp
                 do l = 1, this%lx
                    derivative_x = derivative_x + coef%Xh%dx(i,l) * &
-                        flux_x(l,j,k,e)
+                        flux_x(:,l,j,k,e)
                    derivative_y = derivative_y + coef%Xh%dx(i,l) * &
-                        flux_y(l,j,k,e)
+                        flux_y(:,l,j,k,e)
                    derivative_z = derivative_z + coef%Xh%dx(i,l) * &
-                        flux_z(l,j,k,e)
+                        flux_z(:,l,j,k,e)
                 end do
                 high_residual = coef%B(i,j,k,e) * &
                      coef%jacinv(i,j,k,e) * ( &
@@ -709,62 +775,55 @@ contains
                      coef%drdy(i,j,k,e) * derivative_y + &
                      coef%drdz(i,j,k,e) * derivative_z)
                 line_scale = line_scale + &
-                     abs(this%reconstruction_work_1(i,j,k,e)) + &
-                     abs(high_residual)
-                this%reconstruction_work_1(i,j,k,e) = &
-                     this%reconstruction_work_1(i,j,k,e) - high_residual
+                     abs(line_residual(:,i)) + abs(high_residual)
+                line_residual(:,i) = line_residual(:,i) - high_residual
              end do
              line_scale = max(1.0_rp, line_scale)
              compatibility_error = max(compatibility_error, &
-                  abs(sum(this%reconstruction_work_1(:,j,k,e))) / line_scale)
+                  abs(sum(line_residual(:,1:this%lx), dim = 2)) / line_scale)
              cumulative = 0.0_rp
+             edge_write = edge_first - 1
              do i = 1, this%lx - 1
-                edge = edge + 1
-                cumulative = cumulative + &
-                     this%reconstruction_work_1(i,j,k,e)
-                edge_values(edge) = cumulative
+                edge_write = edge_write + 1
+                cumulative = cumulative + line_residual(:,i)
+                edge_values(:,edge_write) = cumulative
              end do
           end do
        end do
     end do
 
     ! Reference-y contribution.
-    this%reconstruction_work_1 = 0.0_rp
-    do edge = 1, this%n_edges
-       if (this%direction(edge) .ne. 2) cycle
-       associate(a => this%left(:,edge), b => this%right(:,edge), &
-            c => this%coefficient(:,edge))
-         this%reconstruction_work_1(a(1),a(2),a(3),a(4)) = &
-              this%reconstruction_work_1(a(1),a(2),a(3),a(4)) + &
-              c(1) * flux_x(b(1),b(2),b(3),b(4)) + &
-              c(2) * flux_y(b(1),b(2),b(3),b(4)) + &
-              c(3) * flux_z(b(1),b(2),b(3),b(4))
-         this%reconstruction_work_1(b(1),b(2),b(3),b(4)) = &
-              this%reconstruction_work_1(b(1),b(2),b(3),b(4)) - &
-              c(1) * flux_x(a(1),a(2),a(3),a(4)) - &
-              c(2) * flux_y(a(1),a(2),a(3),a(4)) - &
-              c(3) * flux_z(a(1),a(2),a(3),a(4))
-       end associate
-    end do
     do e = 1, this%nelv
        edge = this%element_edge_start(e) - 1 + &
             (this%lx - 1) * this%ly * this%lz
        do k = 1, this%lz
           do i = 1, this%lx
+             line_residual(:,1:this%ly) = 0.0_rp
              edge_first = edge + 1
-             edge_last = edge + this%ly - 1
+             do j = 1, this%ly - 1
+                edge = edge + 1
+                associate(c => this%coefficient(:,edge))
+                  line_residual(:,j) = line_residual(:,j) + &
+                       c(1) * flux_x(:,i,j + 1,k,e) + &
+                       c(2) * flux_y(:,i,j + 1,k,e) + &
+                       c(3) * flux_z(:,i,j + 1,k,e)
+                  line_residual(:,j + 1) = line_residual(:,j + 1) - &
+                       c(1) * flux_x(:,i,j,k,e) - &
+                       c(2) * flux_y(:,i,j,k,e) - &
+                       c(3) * flux_z(:,i,j,k,e)
+                end associate
+             end do
+             edge_last = edge
              associate(c_first => this%coefficient(:,edge_first), &
                   c_last => this%coefficient(:,edge_last))
-               this%reconstruction_work_1(i,1,k,e) = &
-                    this%reconstruction_work_1(i,1,k,e) - &
-                    c_first(1) * flux_x(i,1,k,e) - &
-                    c_first(2) * flux_y(i,1,k,e) - &
-                    c_first(3) * flux_z(i,1,k,e)
-               this%reconstruction_work_1(i,this%ly,k,e) = &
-                    this%reconstruction_work_1(i,this%ly,k,e) + &
-                    c_last(1) * flux_x(i,this%ly,k,e) + &
-                    c_last(2) * flux_y(i,this%ly,k,e) + &
-                    c_last(3) * flux_z(i,this%ly,k,e)
+               line_residual(:,1) = line_residual(:,1) - &
+                    c_first(1) * flux_x(:,i,1,k,e) - &
+                    c_first(2) * flux_y(:,i,1,k,e) - &
+                    c_first(3) * flux_z(:,i,1,k,e)
+               line_residual(:,this%ly) = line_residual(:,this%ly) + &
+                    c_last(1) * flux_x(:,i,this%ly,k,e) + &
+                    c_last(2) * flux_y(:,i,this%ly,k,e) + &
+                    c_last(3) * flux_z(:,i,this%ly,k,e)
              end associate
              line_scale = 0.0_rp
              do j = 1, this%ly
@@ -773,11 +832,11 @@ contains
                 derivative_z = 0.0_rp
                 do l = 1, this%ly
                    derivative_x = derivative_x + coef%Xh%dy(j,l) * &
-                        flux_x(i,l,k,e)
+                        flux_x(:,i,l,k,e)
                    derivative_y = derivative_y + coef%Xh%dy(j,l) * &
-                        flux_y(i,l,k,e)
+                        flux_y(:,i,l,k,e)
                    derivative_z = derivative_z + coef%Xh%dy(j,l) * &
-                        flux_z(i,l,k,e)
+                        flux_z(:,i,l,k,e)
                 end do
                 high_residual = coef%B(i,j,k,e) * &
                      coef%jacinv(i,j,k,e) * ( &
@@ -785,20 +844,18 @@ contains
                      coef%dsdy(i,j,k,e) * derivative_y + &
                      coef%dsdz(i,j,k,e) * derivative_z)
                 line_scale = line_scale + &
-                     abs(this%reconstruction_work_1(i,j,k,e)) + &
-                     abs(high_residual)
-                this%reconstruction_work_1(i,j,k,e) = &
-                     this%reconstruction_work_1(i,j,k,e) - high_residual
+                     abs(line_residual(:,j)) + abs(high_residual)
+                line_residual(:,j) = line_residual(:,j) - high_residual
              end do
              line_scale = max(1.0_rp, line_scale)
              compatibility_error = max(compatibility_error, &
-                  abs(sum(this%reconstruction_work_1(i,:,k,e))) / line_scale)
+                  abs(sum(line_residual(:,1:this%ly), dim = 2)) / line_scale)
              cumulative = 0.0_rp
+             edge_write = edge_first - 1
              do j = 1, this%ly - 1
-                edge = edge + 1
-                cumulative = cumulative + &
-                     this%reconstruction_work_1(i,j,k,e)
-                edge_values(edge) = cumulative
+                edge_write = edge_write + 1
+                cumulative = cumulative + line_residual(:,j)
+                edge_values(:,edge_write) = cumulative
              end do
           end do
        end do
@@ -806,43 +863,38 @@ contains
 
     if (this%lz .gt. 1) then
        ! Reference-z contribution.
-       this%reconstruction_work_1 = 0.0_rp
-       do edge = 1, this%n_edges
-          if (this%direction(edge) .ne. 3) cycle
-          associate(a => this%left(:,edge), b => this%right(:,edge), &
-               c => this%coefficient(:,edge))
-            this%reconstruction_work_1(a(1),a(2),a(3),a(4)) = &
-                 this%reconstruction_work_1(a(1),a(2),a(3),a(4)) + &
-                 c(1) * flux_x(b(1),b(2),b(3),b(4)) + &
-                 c(2) * flux_y(b(1),b(2),b(3),b(4)) + &
-                 c(3) * flux_z(b(1),b(2),b(3),b(4))
-            this%reconstruction_work_1(b(1),b(2),b(3),b(4)) = &
-                 this%reconstruction_work_1(b(1),b(2),b(3),b(4)) - &
-                 c(1) * flux_x(a(1),a(2),a(3),a(4)) - &
-                 c(2) * flux_y(a(1),a(2),a(3),a(4)) - &
-                 c(3) * flux_z(a(1),a(2),a(3),a(4))
-          end associate
-       end do
        do e = 1, this%nelv
           edge = this%element_edge_start(e) - 1 + &
                (this%lx - 1) * this%ly * this%lz + &
                this%lx * (this%ly - 1) * this%lz
           do j = 1, this%ly
              do i = 1, this%lx
+                line_residual(:,1:this%lz) = 0.0_rp
                 edge_first = edge + 1
-                edge_last = edge + this%lz - 1
+                do k = 1, this%lz - 1
+                   edge = edge + 1
+                   associate(c => this%coefficient(:,edge))
+                     line_residual(:,k) = line_residual(:,k) + &
+                          c(1) * flux_x(:,i,j,k + 1,e) + &
+                          c(2) * flux_y(:,i,j,k + 1,e) + &
+                          c(3) * flux_z(:,i,j,k + 1,e)
+                     line_residual(:,k + 1) = line_residual(:,k + 1) - &
+                          c(1) * flux_x(:,i,j,k,e) - &
+                          c(2) * flux_y(:,i,j,k,e) - &
+                          c(3) * flux_z(:,i,j,k,e)
+                   end associate
+                end do
+                edge_last = edge
                 associate(c_first => this%coefficient(:,edge_first), &
                      c_last => this%coefficient(:,edge_last))
-                  this%reconstruction_work_1(i,j,1,e) = &
-                       this%reconstruction_work_1(i,j,1,e) - &
-                       c_first(1) * flux_x(i,j,1,e) - &
-                       c_first(2) * flux_y(i,j,1,e) - &
-                       c_first(3) * flux_z(i,j,1,e)
-                  this%reconstruction_work_1(i,j,this%lz,e) = &
-                       this%reconstruction_work_1(i,j,this%lz,e) + &
-                       c_last(1) * flux_x(i,j,this%lz,e) + &
-                       c_last(2) * flux_y(i,j,this%lz,e) + &
-                       c_last(3) * flux_z(i,j,this%lz,e)
+                  line_residual(:,1) = line_residual(:,1) - &
+                       c_first(1) * flux_x(:,i,j,1,e) - &
+                       c_first(2) * flux_y(:,i,j,1,e) - &
+                       c_first(3) * flux_z(:,i,j,1,e)
+                  line_residual(:,this%lz) = line_residual(:,this%lz) + &
+                       c_last(1) * flux_x(:,i,j,this%lz,e) + &
+                       c_last(2) * flux_y(:,i,j,this%lz,e) + &
+                       c_last(3) * flux_z(:,i,j,this%lz,e)
                 end associate
                 line_scale = 0.0_rp
                 do k = 1, this%lz
@@ -851,11 +903,11 @@ contains
                    derivative_z = 0.0_rp
                    do l = 1, this%lz
                       derivative_x = derivative_x + coef%Xh%dz(k,l) * &
-                           flux_x(i,j,l,e)
+                           flux_x(:,i,j,l,e)
                       derivative_y = derivative_y + coef%Xh%dz(k,l) * &
-                           flux_y(i,j,l,e)
+                           flux_y(:,i,j,l,e)
                       derivative_z = derivative_z + coef%Xh%dz(k,l) * &
-                           flux_z(i,j,l,e)
+                           flux_z(:,i,j,l,e)
                    end do
                    high_residual = coef%B(i,j,k,e) * &
                         coef%jacinv(i,j,k,e) * ( &
@@ -863,27 +915,25 @@ contains
                         coef%dtdy(i,j,k,e) * derivative_y + &
                         coef%dtdz(i,j,k,e) * derivative_z)
                    line_scale = line_scale + &
-                        abs(this%reconstruction_work_1(i,j,k,e)) + &
-                        abs(high_residual)
-                   this%reconstruction_work_1(i,j,k,e) = &
-                        this%reconstruction_work_1(i,j,k,e) - high_residual
+                        abs(line_residual(:,k)) + abs(high_residual)
+                   line_residual(:,k) = line_residual(:,k) - high_residual
                 end do
                 line_scale = max(1.0_rp, line_scale)
                 compatibility_error = max(compatibility_error, &
-                     abs(sum(this%reconstruction_work_1(i,j,:,e))) / &
+                     abs(sum(line_residual(:,1:this%lz), dim = 2)) / &
                      line_scale)
                 cumulative = 0.0_rp
+                edge_write = edge_first - 1
                 do k = 1, this%lz - 1
-                   edge = edge + 1
-                   cumulative = cumulative + &
-                        this%reconstruction_work_1(i,j,k,e)
-                   edge_values(edge) = cumulative
+                   edge_write = edge_write + 1
+                   cumulative = cumulative + line_residual(:,k)
+                   edge_values(:,edge_write) = cumulative
                 end do
              end do
           end do
        end do
     end if
-  end subroutine euler_gll_graph_directional_reconstruct
+  end subroutine euler_gll_graph_directional_reconstruct_vector
 
   !> Check that every physical exterior facet has periodic metadata.
   logical function euler_gll_graph_periodic_facets_covered(this, coef) &

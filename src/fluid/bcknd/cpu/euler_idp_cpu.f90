@@ -107,6 +107,9 @@ module euler_idp_cpu
      real(kind=rp), allocatable :: edge_wave_speed(:)
      real(kind=rp), allocatable :: bar_state(:,:)
      real(kind=rp), allocatable :: correction_flux(:,:)
+     real(kind=rp), allocatable :: reconstruction_flux_x(:,:,:,:,:)
+     real(kind=rp), allocatable :: reconstruction_flux_y(:,:,:,:,:)
+     real(kind=rp), allocatable :: reconstruction_flux_z(:,:,:,:,:)
      real(kind=rp), allocatable :: edge_limiter(:)
      integer, allocatable :: state_status(:)
      real(kind=rp) :: max_graph_rate = 0.0_rp
@@ -255,6 +258,15 @@ contains
     if (allocated(this%edge_wave_speed)) deallocate(this%edge_wave_speed)
     if (allocated(this%bar_state)) deallocate(this%bar_state)
     if (allocated(this%correction_flux)) deallocate(this%correction_flux)
+    if (allocated(this%reconstruction_flux_x)) then
+       deallocate(this%reconstruction_flux_x)
+    end if
+    if (allocated(this%reconstruction_flux_y)) then
+       deallocate(this%reconstruction_flux_y)
+    end if
+    if (allocated(this%reconstruction_flux_z)) then
+       deallocate(this%reconstruction_flux_z)
+    end if
     if (allocated(this%edge_limiter)) deallocate(this%edge_limiter)
     call this%graph%init(coef, gs)
     this%domain_volume = coef%volume
@@ -280,6 +292,14 @@ contains
     allocate(this%edge_wave_speed(this%graph%n_edges))
     allocate(this%bar_state(EULER_IDP_NCOMP, this%graph%n_edges))
     allocate(this%correction_flux(EULER_IDP_NCOMP, this%graph%n_edges))
+    if (this%graph%affine) then
+       allocate(this%reconstruction_flux_x(EULER_IDP_NCOMP, this%graph%lx, &
+            this%graph%ly, this%graph%lz, this%graph%nelv))
+       allocate(this%reconstruction_flux_y(EULER_IDP_NCOMP, this%graph%lx, &
+            this%graph%ly, this%graph%lz, this%graph%nelv))
+       allocate(this%reconstruction_flux_z(EULER_IDP_NCOMP, this%graph%lx, &
+            this%graph%ly, this%graph%lz, this%graph%nelv))
+    end if
     allocate(this%edge_limiter(this%graph%n_edges))
     this%edge_viscosity = 0.0_rp
     this%edge_entropy_diffusion = 0.0_rp
@@ -384,6 +404,15 @@ contains
     if (allocated(this%edge_wave_speed)) deallocate(this%edge_wave_speed)
     if (allocated(this%bar_state)) deallocate(this%bar_state)
     if (allocated(this%correction_flux)) deallocate(this%correction_flux)
+    if (allocated(this%reconstruction_flux_x)) then
+       deallocate(this%reconstruction_flux_x)
+    end if
+    if (allocated(this%reconstruction_flux_y)) then
+       deallocate(this%reconstruction_flux_y)
+    end if
+    if (allocated(this%reconstruction_flux_z)) then
+       deallocate(this%reconstruction_flux_z)
+    end if
     if (allocated(this%edge_limiter)) deallocate(this%edge_limiter)
     if (allocated(this%state_status)) deallocate(this%state_status)
     this%initialized = .false.
@@ -858,7 +887,8 @@ contains
     real(kind=rp) :: local_error, local_scale
     real(kind=rp) :: local_bound_violation(2), local_entropy_violation
     real(kind=rp) :: local_entropy_excess, entropy, entropy_tolerance
-    real(kind=rp) :: high_order_fraction, state_difference
+    real(kind=rp) :: high_order_fraction
+    real(kind=rp) :: state_difference(EULER_IDP_NCOMP)
     real(kind=rp) :: directional_error_local(EULER_IDP_NCOMP)
     character(len=2 * LOG_SIZE) :: message
     integer :: component, edge, i, ierr
@@ -993,45 +1023,58 @@ contains
     ! coordinate-neighbour graph.
     call profiler_start_region('Euler IDP reconstruction')
     directional_error_local = 0.0_rp
-    do component = 1, EULER_IDP_NCOMP
-       call euler_idp_cpu_flux(this, component, m_x, m_y, m_z, energy)
-       call this%graph%directional_correction_flux( &
-            this%correction_flux(component,:), this%flux_x%x, &
-            this%flux_y%x, this%flux_z%x, coef, &
-            directional_error_local(component))
-       this%correction_flux(component,:) = dt * &
-            this%correction_flux(component,:)
-       do edge = 1, this%graph%n_edges
-          associate(a => this%graph%left(:,edge), &
-               b => this%graph%right(:,edge))
-            state_difference = euler_idp_cpu_state_component(component, a, &
-                 rho, m_x, m_y, m_z, energy) - &
-                 euler_idp_cpu_state_component(component, b, rho, m_x, m_y, &
-                 m_z, energy)
-          end associate
-          ! Complete the raw low-to-high correction with the low-order graph
-          ! viscosity. The directional reconstruction above contains only the
-          ! difference between the sparse and dense inviscid operators.
-          this%correction_flux(component,edge) = &
-               this%correction_flux(component,edge) + dt * &
-               this%edge_viscosity(edge) * state_difference
-          high_order_fraction = 1.0_rp
-          if (this%low_order_only) then
-             high_order_fraction = 0.0_rp
-          else if (this%edge_viscosity(edge) .gt. tiny(1.0_rp)) then
-             high_order_fraction = 1.0_rp - min(1.0_rp, &
-                  this%edge_entropy_diffusion(edge) / &
-                  this%edge_viscosity(edge))
-          end if
-          ! Entropy viscosity blends the complete low-to-high subcell flux.
-          ! The sparse and dense inviscid operators differ, so damping only
-          ! the state-jump term would not recover the low-order endpoint.
-          this%correction_flux(component,edge) = high_order_fraction * &
-               this%correction_flux(component,edge)
+    if (this%graph%affine) then
+       call euler_idp_cpu_reconstruction_flux(this, m_x, m_y, m_z, energy)
+       call this%graph%directional_correction_flux_vector( &
+            this%correction_flux, this%reconstruction_flux_x, &
+            this%reconstruction_flux_y, this%reconstruction_flux_z, coef, &
+            directional_error_local)
+    else
+       do component = 1, EULER_IDP_NCOMP
+          call euler_idp_cpu_flux(this, component, m_x, m_y, m_z, energy)
+          call this%graph%directional_correction_flux( &
+               this%correction_flux(component,:), this%flux_x%x, &
+               this%flux_y%x, this%flux_z%x, coef, &
+               directional_error_local(component))
        end do
-       if (scalar_density_mode .and. component .gt. 1) then
-          this%correction_flux(component,:) = 0.0_rp
+    end if
+
+    do edge = 1, this%graph%n_edges
+       associate(a => this%graph%left(:,edge), &
+            b => this%graph%right(:,edge))
+         state_difference(1) = rho%x(a(1),a(2),a(3),a(4)) - &
+              rho%x(b(1),b(2),b(3),b(4))
+         state_difference(2) = m_x%x(a(1),a(2),a(3),a(4)) - &
+              m_x%x(b(1),b(2),b(3),b(4))
+         state_difference(3) = m_y%x(a(1),a(2),a(3),a(4)) - &
+              m_y%x(b(1),b(2),b(3),b(4))
+         state_difference(4) = m_z%x(a(1),a(2),a(3),a(4)) - &
+              m_z%x(b(1),b(2),b(3),b(4))
+         state_difference(5) = energy%x(a(1),a(2),a(3),a(4)) - &
+              energy%x(b(1),b(2),b(3),b(4))
+       end associate
+
+       high_order_fraction = 1.0_rp
+       if (this%low_order_only) then
+          high_order_fraction = 0.0_rp
+       else if (this%edge_viscosity(edge) .gt. tiny(1.0_rp)) then
+          high_order_fraction = 1.0_rp - min(1.0_rp, &
+               this%edge_entropy_diffusion(edge) / &
+               this%edge_viscosity(edge))
        end if
+
+       ! Complete the raw low-to-high correction with the low-order graph
+       ! viscosity, then apply the entropy-viscosity blend to the complete
+       ! conservative edge vector.
+       this%correction_flux(:,edge) = dt * high_order_fraction * &
+            (this%correction_flux(:,edge) + &
+            this%edge_viscosity(edge) * state_difference)
+       if (scalar_density_mode) then
+          this%correction_flux(2:EULER_IDP_NCOMP,edge) = 0.0_rp
+       end if
+    end do
+
+    do component = 1, EULER_IDP_NCOMP
        call this%graph%incidence(this%flux_x%x, &
             this%correction_flux(component,:))
        call gs%op(this%flux_x, GS_OP_ADD)
@@ -1522,6 +1565,45 @@ contains
        end do
     end select
   end subroutine euler_idp_cpu_flux
+
+  !> Construct all Cartesian Euler fluxes for vector reconstruction.
+  subroutine euler_idp_cpu_reconstruction_flux(this, m_x, m_y, m_z, energy)
+    class(euler_idp_cpu_t), intent(inout) :: this
+    type(field_t), intent(in) :: m_x, m_y, m_z, energy
+    real(kind=rp) :: mx, my, mz, total_energy
+    real(kind=rp) :: pressure, velocity_x, velocity_y, velocity_z
+    integer :: e, i, j, k
+
+    do e = 1, size(this%reconstruction_flux_x, 5)
+       do k = 1, size(this%reconstruction_flux_x, 4)
+          do j = 1, size(this%reconstruction_flux_x, 3)
+             do i = 1, size(this%reconstruction_flux_x, 2)
+                mx = m_x%x(i,j,k,e)
+                my = m_y%x(i,j,k,e)
+                mz = m_z%x(i,j,k,e)
+                total_energy = energy%x(i,j,k,e)
+                pressure = this%p%x(i,j,k,e)
+                velocity_x = this%u%x(i,j,k,e)
+                velocity_y = this%v%x(i,j,k,e)
+                velocity_z = this%w%x(i,j,k,e)
+
+                this%reconstruction_flux_x(:,i,j,k,e) = [mx, &
+                     mx * velocity_x + pressure, my * velocity_x, &
+                     mz * velocity_x, &
+                     (total_energy + pressure) * velocity_x]
+                this%reconstruction_flux_y(:,i,j,k,e) = [my, &
+                     mx * velocity_y, my * velocity_y + pressure, &
+                     mz * velocity_y, &
+                     (total_energy + pressure) * velocity_y]
+                this%reconstruction_flux_z(:,i,j,k,e) = [mz, &
+                     mx * velocity_z, my * velocity_z, &
+                     mz * velocity_z + pressure, &
+                     (total_energy + pressure) * velocity_z]
+             end do
+          end do
+       end do
+    end do
+  end subroutine euler_idp_cpu_reconstruction_flux
 
   !> Read one conserved component at a graph endpoint.
   real(kind=rp) function euler_idp_cpu_state_component(component, index, &
