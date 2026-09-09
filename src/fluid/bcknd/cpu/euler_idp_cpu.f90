@@ -396,10 +396,10 @@ contains
     real(kind=rp) :: right_flux(EULER_IDP_NCOMP)
     real(kind=rp) :: bar_state(EULER_IDP_NCOMP)
     real(kind=rp) :: normal(3), coefficient_norm, flux_scale
-    real(kind=rp) :: local_rate, global_rate
-    real(kind=rp) :: local_wave_speed, global_wave_speed
+    real(kind=rp) :: local_maximum(2), global_maximum(2)
     real(kind=rp) :: left_wave_speed, right_wave_speed, edge_wave_speed
     integer :: edge, ierr
+    logical :: validate_bar_state
 
     if (.not. this%graph%initialized) then
        call neko_error('Euler IDP graph is not initialised')
@@ -407,22 +407,26 @@ contains
 
     call profiler_start_region('Euler IDP graph viscosity')
     this%viscosity_sum%x = 0.0_rp
-    local_wave_speed = 0.0_rp
+    local_maximum = 0.0_rp
+    validate_bar_state = &
+         this%diagnostics_level .eq. EULER_IDP_DIAGNOSTICS_FULL
     do edge = 1, this%graph%n_edges
        associate(a => this%graph%left(:,edge), &
             b => this%graph%right(:,edge), &
             coefficient => this%graph%coefficient(:,edge))
-         left_state = [rho%x(a(1),a(2),a(3),a(4)), &
-              m_x%x(a(1),a(2),a(3),a(4)), &
-              m_y%x(a(1),a(2),a(3),a(4)), &
-              m_z%x(a(1),a(2),a(3),a(4)), &
-              energy%x(a(1),a(2),a(3),a(4))]
-         right_state = [rho%x(b(1),b(2),b(3),b(4)), &
-              m_x%x(b(1),b(2),b(3),b(4)), &
-              m_y%x(b(1),b(2),b(3),b(4)), &
-              m_z%x(b(1),b(2),b(3),b(4)), &
-              energy%x(b(1),b(2),b(3),b(4))]
-         coefficient_norm = sqrt(dot_product(coefficient, coefficient))
+         if (.not. present(graph_wave_speed) .or. validate_bar_state) then
+            left_state = [rho%x(a(1),a(2),a(3),a(4)), &
+                 m_x%x(a(1),a(2),a(3),a(4)), &
+                 m_y%x(a(1),a(2),a(3),a(4)), &
+                 m_z%x(a(1),a(2),a(3),a(4)), &
+                 energy%x(a(1),a(2),a(3),a(4))]
+            right_state = [rho%x(b(1),b(2),b(3),b(4)), &
+                 m_x%x(b(1),b(2),b(3),b(4)), &
+                 m_y%x(b(1),b(2),b(3),b(4)), &
+                 m_z%x(b(1),b(2),b(3),b(4)), &
+                 energy%x(b(1),b(2),b(3),b(4))]
+         end if
+         coefficient_norm = this%graph%coefficient_norm(edge)
          normal = coefficient / coefficient_norm
          if (present(graph_wave_speed)) then
             left_wave_speed = graph_wave_speed%x(a(1),a(2),a(3),a(4))
@@ -441,31 +445,33 @@ contains
          end if
          this%edge_viscosity(edge) = coefficient_norm * &
               edge_wave_speed
-         local_wave_speed = max(local_wave_speed, edge_wave_speed)
-         call euler_idp_flux_dot_vector(left_state, coefficient, gamma, &
-              left_flux)
-         call euler_idp_flux_dot_vector(right_state, coefficient, gamma, &
-              right_flux)
-         if (this%edge_viscosity(edge) .le. tiny(1.0_rp)) then
-            flux_scale = max(1.0_rp, maxval(abs(left_flux)), &
-                 maxval(abs(right_flux)))
-            if (maxval(abs(right_flux - left_flux)) .gt. &
-                 128.0_rp * epsilon(1.0_rp) * flux_scale) then
-               call neko_error('Zero graph viscosity has a nonzero ' // &
-                    'projected flux jump')
+         local_maximum(2) = max(local_maximum(2), edge_wave_speed)
+         if (validate_bar_state) then
+            call euler_idp_flux_dot_vector(left_state, coefficient, gamma, &
+                 left_flux)
+            call euler_idp_flux_dot_vector(right_state, coefficient, gamma, &
+                 right_flux)
+            if (this%edge_viscosity(edge) .le. tiny(1.0_rp)) then
+               flux_scale = max(1.0_rp, maxval(abs(left_flux)), &
+                    maxval(abs(right_flux)))
+               if (maxval(abs(right_flux - left_flux)) .gt. &
+                    128.0_rp * epsilon(1.0_rp) * flux_scale) then
+                  call neko_error('Zero graph viscosity has a nonzero ' // &
+                       'projected flux jump')
+               end if
             end if
-         end if
-         call euler_idp_bar_state(left_state, right_state, &
-              right_flux - left_flux, this%edge_viscosity(edge), &
-              bar_state)
-         if (bar_state(1) .le. 0.0_rp) then
-            call neko_error('Euler IDP graph viscosity produced a bar ' // &
-                 'state with nonpositive density')
-         end if
-         if ((this%limit_internal_energy .or. this%limit_entropy) .and. &
-              euler_idp_internal_energy(bar_state) .le. 0.0_rp) then
-            call neko_error('Euler IDP graph viscosity produced a bar ' // &
-                 'state with nonpositive internal energy')
+            call euler_idp_bar_state(left_state, right_state, &
+                 right_flux - left_flux, this%edge_viscosity(edge), &
+                 bar_state)
+            if (bar_state(1) .le. 0.0_rp) then
+               call neko_error('Euler IDP graph viscosity produced a bar ' // &
+                    'state with nonpositive density')
+            end if
+            if ((this%limit_internal_energy .or. this%limit_entropy) .and. &
+                 euler_idp_internal_energy(bar_state) .le. 0.0_rp) then
+               call neko_error('Euler IDP graph viscosity produced a bar ' // &
+                    'state with nonpositive internal energy')
+            end if
          end if
          this%viscosity_sum%x(a(1),a(2),a(3),a(4)) = &
               this%viscosity_sum%x(a(1),a(2),a(3),a(4)) + &
@@ -479,21 +485,18 @@ contains
     call gs%op(this%viscosity_sum, GS_OP_ADD)
     call profiler_end_region('Euler IDP gather-scatter')
 
-    local_rate = 0.0_rp
     if (rho%size() .gt. 0) then
-       local_rate = maxval(2.0_rp * this%viscosity_sum%x / &
+       local_maximum(1) = maxval(2.0_rp * this%viscosity_sum%x / &
             this%graph%mass%x)
     end if
     call profiler_start_region('Euler IDP MPI reduction')
-    call MPI_Allreduce(local_rate, global_rate, 1, MPI_REAL_PRECISION, &
-         MPI_MAX, NEKO_COMM, ierr)
-    call MPI_Allreduce(local_wave_speed, global_wave_speed, 1, &
+    call MPI_Allreduce(local_maximum, global_maximum, 2, &
          MPI_REAL_PRECISION, MPI_MAX, NEKO_COMM, ierr)
     call profiler_end_region('Euler IDP MPI reduction')
-    this%max_graph_rate = global_rate
-    this%max_graph_wave_speed = global_wave_speed
-    if (global_rate .gt. 0.0_rp) then
-       this%maximum_graph_timestep = 1.0_rp / global_rate
+    this%max_graph_rate = global_maximum(1)
+    this%max_graph_wave_speed = global_maximum(2)
+    if (global_maximum(1) .gt. 0.0_rp) then
+       this%maximum_graph_timestep = 1.0_rp / global_maximum(1)
     else
        this%maximum_graph_timestep = huge(1.0_rp)
     end if
@@ -741,41 +744,43 @@ contains
     end if
     call profiler_end_region('Euler IDP gather-scatter')
 
-    local_violation = 0.0_rp
-    if (rho%size() .gt. 0) then
-       scale = max(1.0_rp, maxval(abs(this%low_candidate(1)%x)), &
-            maxval(abs(this%density_lower_bound%x)), &
-            maxval(abs(this%density_upper_bound%x)))
-       local_violation = max( &
-            maxval(this%density_lower_bound%x - &
-            this%low_candidate(1)%x), &
-            maxval(this%low_candidate(1)%x - &
-            this%density_upper_bound%x), 0.0_rp) / scale
-    end if
-    tolerance = 256.0_rp * epsilon(1.0_rp)
-    if (local_violation .gt. tolerance) then
-       call neko_error('Euler IDP low-order density is outside its local ' // &
-            'bar-state bounds')
-    end if
+    if (this%diagnostics_level .eq. EULER_IDP_DIAGNOSTICS_FULL) then
+       local_violation = 0.0_rp
+       if (rho%size() .gt. 0) then
+          scale = max(1.0_rp, maxval(abs(this%low_candidate(1)%x)), &
+               maxval(abs(this%density_lower_bound%x)), &
+               maxval(abs(this%density_upper_bound%x)))
+          local_violation = max( &
+               maxval(this%density_lower_bound%x - &
+               this%low_candidate(1)%x), &
+               maxval(this%low_candidate(1)%x - &
+               this%density_upper_bound%x), 0.0_rp) / scale
+       end if
+       tolerance = 256.0_rp * epsilon(1.0_rp)
+       if (local_violation .gt. tolerance) then
+          call neko_error('Euler IDP low-order density is outside its local ' // &
+               'bar-state bounds')
+       end if
 
-    if (this%limit_entropy) then
-       local_entropy_excess = 0.0_rp
-       do i = 1, rho%size()
-          state = [this%low_candidate(1)%x(i,1,1,1), &
-               this%low_candidate(2)%x(i,1,1,1), &
-               this%low_candidate(3)%x(i,1,1,1), &
-               this%low_candidate(4)%x(i,1,1,1), &
-               this%low_candidate(5)%x(i,1,1,1)]
-          entropy = euler_idp_specific_entropy(state, gamma)
-          difference = this%entropy_lower_bound%x(i,1,1,1) - entropy
-          entropy_tolerance = euler_idp_entropy_tolerance(state, &
-               this%entropy_lower_bound%x(i,1,1,1))
-          local_entropy_excess = max(local_entropy_excess, &
-               difference - entropy_tolerance)
-       end do
-       if (local_entropy_excess .gt. 0.0_rp) then
-          call neko_error('Euler IDP low-order state violates its local ' // &
-               'minimum entropy bound')
+       if (this%limit_entropy) then
+          local_entropy_excess = 0.0_rp
+          do i = 1, rho%size()
+             state = [this%low_candidate(1)%x(i,1,1,1), &
+                  this%low_candidate(2)%x(i,1,1,1), &
+                  this%low_candidate(3)%x(i,1,1,1), &
+                  this%low_candidate(4)%x(i,1,1,1), &
+                  this%low_candidate(5)%x(i,1,1,1)]
+             entropy = euler_idp_specific_entropy(state, gamma)
+             difference = this%entropy_lower_bound%x(i,1,1,1) - entropy
+             entropy_tolerance = euler_idp_entropy_tolerance(state, &
+                  this%entropy_lower_bound%x(i,1,1,1))
+             local_entropy_excess = max(local_entropy_excess, &
+                  difference - entropy_tolerance)
+          end do
+          if (local_entropy_excess .gt. 0.0_rp) then
+             call neko_error('Euler IDP low-order state violates its local ' // &
+                  'minimum entropy bound')
+          end if
        end if
     end if
 
@@ -1132,19 +1137,23 @@ contains
               density_limited, energy_limited, entropy_limited, &
               this%limit_internal_energy, this%limit_entropy)
        end associate
-       if (.not. ieee_is_finite(edge_limit) .or. edge_limit .lt. 0.0_rp .or. &
-            edge_limit .gt. 1.0_rp) then
-          call neko_error('Euler IDP produced an invalid edge limiter')
+       if (this%diagnostics_level .ne. EULER_IDP_DIAGNOSTICS_OFF) then
+          if (.not. ieee_is_finite(edge_limit) .or. &
+               edge_limit .lt. 0.0_rp .or. edge_limit .gt. 1.0_rp) then
+             call neko_error('Euler IDP produced an invalid edge limiter')
+          end if
        end if
-       local_minimum = min(local_minimum, edge_limit)
-       local_count(1) = local_count(1) + 1
-       if (edge_limit .lt. &
-            1.0_rp - 32.0_rp * epsilon(1.0_rp)) then
-          local_count(2) = local_count(2) + 1
+       if (this%diagnostics_level .eq. EULER_IDP_DIAGNOSTICS_FULL) then
+          local_minimum = min(local_minimum, edge_limit)
+          local_count(1) = local_count(1) + 1
+          if (edge_limit .lt. &
+               1.0_rp - 32.0_rp * epsilon(1.0_rp)) then
+             local_count(2) = local_count(2) + 1
+          end if
+          if (density_limited) local_count(3) = local_count(3) + 1
+          if (energy_limited) local_count(4) = local_count(4) + 1
+          if (entropy_limited) local_count(5) = local_count(5) + 1
        end if
-       if (density_limited) local_count(3) = local_count(3) + 1
-       if (energy_limited) local_count(4) = local_count(4) + 1
-       if (entropy_limited) local_count(5) = local_count(5) + 1
        this%correction_flux(:,edge) = edge_limit * &
             this%correction_flux(:,edge)
     end do

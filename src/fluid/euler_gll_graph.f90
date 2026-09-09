@@ -60,6 +60,7 @@ module euler_gll_graph
      integer, allocatable :: direction(:)
      integer, allocatable :: element_edge_start(:)
      real(kind=rp), allocatable :: coefficient(:,:)
+     real(kind=rp), allocatable :: coefficient_norm(:)
      real(kind=rp), allocatable :: diagonal_coefficient(:,:,:,:,:)
      !> One-dimensional GLL quadrature weights used by reconstruction.
      real(kind=rp), allocatable :: weight_x(:)
@@ -136,6 +137,7 @@ contains
     allocate(this%right(4, this%n_edges))
     allocate(this%direction(this%n_edges))
     allocate(this%coefficient(3, this%n_edges))
+    allocate(this%coefficient_norm(this%n_edges))
     allocate(this%element_edge_start(this%nelv + 1))
     this%element_edge_start = 1
     allocate(this%diagonal_coefficient(3, this%lx, this%ly, this%lz, &
@@ -308,6 +310,14 @@ contains
        call neko_error('Euler GLL graph metric projection failed')
     end if
 
+    do edge = 1, this%n_edges
+       this%coefficient_norm(edge) = sqrt(sum( &
+            this%coefficient(:,edge) * this%coefficient(:,edge)))
+    end do
+    if (any(this%coefficient_norm .le. tiny(1.0_rp))) then
+       call neko_error('Euler GLL graph contains a zero-length coefficient')
+    end if
+
     call this%mass%init(coef%dof, 'euler_gll_graph_mass')
     do direction = 1, 3
        write(name, '(A,I0)') 'euler_gll_graph_directional_degree_', &
@@ -337,9 +347,9 @@ contains
               1.0_rp
        end associate
     end do
-    do direction = 1, 3
-       call gs%op(this%directional_degree(direction), GS_OP_ADD)
-    end do
+    call gs%op(this%directional_degree(1)%x, &
+         this%directional_degree(2)%x, this%directional_degree(3)%x, &
+         this%mass%size(), GS_OP_ADD)
     this%initialized = .true.
   end subroutine euler_gll_graph_init
 
@@ -352,6 +362,9 @@ contains
     if (allocated(this%right)) deallocate(this%right)
     if (allocated(this%direction)) deallocate(this%direction)
     if (allocated(this%coefficient)) deallocate(this%coefficient)
+    if (allocated(this%coefficient_norm)) then
+       deallocate(this%coefficient_norm)
+    end if
     if (allocated(this%element_edge_start)) then
        deallocate(this%element_edge_start)
     end if
