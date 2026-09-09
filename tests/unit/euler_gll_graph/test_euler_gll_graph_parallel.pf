@@ -239,6 +239,60 @@ contains
     call free_warped_hex_fixture(graph, coef, gs, dof, Xh, msh)
   end subroutine test_affine_vector_matches_scalar
 
+  !> Direct incidence assembly must equal the limiter's convex endpoint form.
+  @test(npes=[1])
+  subroutine test_direct_correction_matches_convex_form(this)
+    class(test_euler_gll_graph), intent(inout) :: this
+    type(mesh_t) :: msh
+    type(space_t) :: Xh
+    type(dofmap_t) :: dof
+    type(gs_t) :: gs
+    type(coef_t) :: coef
+    type(euler_gll_graph_t) :: graph
+    real(kind=rp) :: base(lx_test,lx_test,lx_test,1)
+    real(kind=rp) :: direct(lx_test,lx_test,lx_test,1)
+    real(kind=rp) :: convex(lx_test,lx_test,lx_test,1)
+    real(kind=rp) :: incidence(lx_test,lx_test,lx_test,1)
+    real(kind=rp), allocatable :: edge_flux(:)
+    real(kind=rp) :: degree, weight, error_scale
+    integer :: direction, edge
+
+    call build_affine_hex_fixture(msh, Xh, dof, gs, coef)
+    call graph%init(coef, gs)
+    allocate(edge_flux(graph%n_edges))
+    do edge = 1, graph%n_edges
+       edge_flux(edge) = 0.01_rp * sin(real(7 * edge, rp))
+    end do
+    base = 1.0_rp + 0.1_rp * dof%x - 0.2_rp * dof%y + 0.3_rp * dof%z
+
+    call graph%incidence(incidence, edge_flux)
+    direct = base + incidence / graph%mass%x
+    convex = 0.0_rp
+    do edge = 1, graph%n_edges
+       associate(a => graph%left(:,edge), b => graph%right(:,edge))
+         direction = graph%direction(edge)
+         degree = graph%directional_degree(direction)%x( &
+              a(1),a(2),a(3),a(4))
+         weight = 1.0_rp / (real(graph%n_directions, rp) * degree)
+         convex(a(1),a(2),a(3),a(4)) = convex(a(1),a(2),a(3),a(4)) + &
+              weight * (base(a(1),a(2),a(3),a(4)) + edge_flux(edge) / &
+              (graph%mass%x(a(1),a(2),a(3),a(4)) * weight))
+         degree = graph%directional_degree(direction)%x( &
+              b(1),b(2),b(3),b(4))
+         weight = 1.0_rp / (real(graph%n_directions, rp) * degree)
+         convex(b(1),b(2),b(3),b(4)) = convex(b(1),b(2),b(3),b(4)) + &
+              weight * (base(b(1),b(2),b(3),b(4)) - edge_flux(edge) / &
+              (graph%mass%x(b(1),b(2),b(3),b(4)) * weight))
+       end associate
+    end do
+
+    error_scale = max(1.0_rp, maxval(abs(convex)))
+    @assertEqual(0.0_rp, maxval(abs(direct - convex)), tolerance = 64.0_rp * epsilon(1.0_rp) * error_scale)
+
+    deallocate(edge_flux)
+    call free_warped_hex_fixture(graph, coef, gs, dof, Xh, msh)
+  end subroutine test_direct_correction_matches_convex_form
+
   !> Build one affine Cartesian hex.
   subroutine build_affine_hex_fixture(msh, Xh, dof, gs, coef)
     type(mesh_t), intent(inout) :: msh

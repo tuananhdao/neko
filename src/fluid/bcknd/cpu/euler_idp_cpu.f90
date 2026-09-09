@@ -79,7 +79,6 @@ module euler_idp_cpu
      type(field_t) :: low_local_residual(EULER_IDP_NCOMP)
      type(field_t) :: low_assembled_residual(EULER_IDP_NCOMP)
      type(field_t) :: low_candidate(EULER_IDP_NCOMP)
-     type(field_t) :: limited_candidate(EULER_IDP_NCOMP)
      type(field_t) :: saved_state(EULER_IDP_NCOMP)
      type(field_t) :: viscosity_sum
      type(field_t) :: limiter_weight_sum
@@ -111,7 +110,6 @@ module euler_idp_cpu
      real(kind=rp), allocatable :: reconstruction_flux_x(:,:,:,:,:)
      real(kind=rp), allocatable :: reconstruction_flux_y(:,:,:,:,:)
      real(kind=rp), allocatable :: reconstruction_flux_z(:,:,:,:,:)
-     real(kind=rp), allocatable :: edge_limiter(:)
      integer, allocatable :: state_status(:)
      real(kind=rp) :: domain_volume = 0.0_rp
      real(kind=rp) :: density_relaxation_mass = 0.0_rp
@@ -167,8 +165,6 @@ contains
        call this%low_assembled_residual(component)%init(dof, trim(name))
        write(name, '(A,I0)') 'euler_idp_low_candidate_', component
        call this%low_candidate(component)%init(dof, trim(name))
-       write(name, '(A,I0)') 'euler_idp_limited_candidate_', component
-       call this%limited_candidate(component)%init(dof, trim(name))
     end do
 
     call this%rho%init(dof, 'euler_idp_rho')
@@ -299,7 +295,6 @@ contains
     if (allocated(this%reconstruction_flux_z)) then
        deallocate(this%reconstruction_flux_z)
     end if
-    if (allocated(this%edge_limiter)) deallocate(this%edge_limiter)
     call this%graph%init(coef, gs)
     this%domain_volume = coef%volume
     if (.not. ieee_is_finite(this%domain_volume) .or. &
@@ -332,13 +327,11 @@ contains
        allocate(this%reconstruction_flux_z(EULER_IDP_NCOMP, this%graph%lx, &
             this%graph%ly, this%graph%lz, this%graph%nelv))
     end if
-    allocate(this%edge_limiter(this%graph%n_edges))
     this%edge_viscosity = 0.0_rp
     this%edge_entropy_diffusion = 0.0_rp
     this%edge_wave_speed = 0.0_rp
     this%bar_state = 0.0_rp
     this%correction_flux = 0.0_rp
-    this%edge_limiter = 1.0_rp
 
     local_error = 0.0_rp
     if (this%graph%mass%size() .gt. 0) then
@@ -393,7 +386,6 @@ contains
        call this%low_local_residual(component)%free()
        call this%low_assembled_residual(component)%free()
        call this%low_candidate(component)%free()
-       call this%limited_candidate(component)%free()
        call this%saved_state(component)%free()
     end do
     call this%rho%free()
@@ -442,7 +434,6 @@ contains
     if (allocated(this%reconstruction_flux_z)) then
        deallocate(this%reconstruction_flux_z)
     end if
-    if (allocated(this%edge_limiter)) deallocate(this%edge_limiter)
     if (allocated(this%state_status)) deallocate(this%state_status)
     this%initialized = .false.
     this%periodic_graph = .false.
@@ -1196,6 +1187,7 @@ contains
     real(kind=rp) :: left_correction(EULER_IDP_NCOMP)
     real(kind=rp) :: right_correction(EULER_IDP_NCOMP)
     real(kind=rp) :: left_entropy_bound, right_entropy_bound
+    real(kind=rp) :: edge_limit
     real(kind=rp) :: local_minimum, global_minimum
     integer :: local_count(5), global_count(5)
     integer :: direction, edge, component, ierr
@@ -1241,24 +1233,25 @@ contains
               this%density_lower_bound%x(b(1),b(2),b(3),b(4)), &
               this%density_upper_bound%x(b(1),b(2),b(3),b(4)), &
               left_entropy_bound, right_entropy_bound, gamma, &
-              internal_energy_floor, this%edge_limiter(edge), &
+              internal_energy_floor, edge_limit, &
               density_limited, energy_limited, entropy_limited, &
               this%limit_internal_energy, this%limit_entropy)
        end associate
-       if (.not. ieee_is_finite(this%edge_limiter(edge)) .or. &
-            this%edge_limiter(edge) .lt. 0.0_rp .or. &
-            this%edge_limiter(edge) .gt. 1.0_rp) then
+       if (.not. ieee_is_finite(edge_limit) .or. edge_limit .lt. 0.0_rp .or. &
+            edge_limit .gt. 1.0_rp) then
           call neko_error('Euler IDP produced an invalid edge limiter')
        end if
-       local_minimum = min(local_minimum, this%edge_limiter(edge))
+       local_minimum = min(local_minimum, edge_limit)
        local_count(1) = local_count(1) + 1
-       if (this%edge_limiter(edge) .lt. &
+       if (edge_limit .lt. &
             1.0_rp - 32.0_rp * epsilon(1.0_rp)) then
           local_count(2) = local_count(2) + 1
        end if
        if (density_limited) local_count(3) = local_count(3) + 1
        if (energy_limited) local_count(4) = local_count(4) + 1
        if (entropy_limited) local_count(5) = local_count(5) + 1
+       this%correction_flux(:,edge) = edge_limit * &
+            this%correction_flux(:,edge)
     end do
 
     if (this%diagnostics_level .eq. EULER_IDP_DIAGNOSTICS_FULL) then
@@ -1284,49 +1277,21 @@ contains
     call profiler_end_region('Euler IDP vector limiter')
   end subroutine euler_idp_cpu_compute_limiter
 
-  !> Assemble the limited state as its invariant-domain convex combination.
+  !> Assemble the limited correction directly through graph incidence.
   subroutine euler_idp_cpu_apply_correction(this, gs)
     class(euler_idp_cpu_t), intent(inout) :: this
     type(gs_t), intent(inout) :: gs
-    real(kind=rp) :: degree, weight, auxiliary
-    integer :: component, direction, edge
+    integer :: component
 
     call profiler_start_region('Euler IDP correction asm')
     do component = 1, EULER_IDP_NCOMP
-       this%limited_candidate(component)%x = 0.0_rp
-       do edge = 1, this%graph%n_edges
-          associate(a => this%graph%left(:,edge), &
-               b => this%graph%right(:,edge))
-            direction = this%graph%direction(edge)
-
-            degree = this%graph%directional_degree(direction)%x( &
-                 a(1),a(2),a(3),a(4))
-            weight = 1.0_rp / (real(this%graph%n_directions, rp) * degree)
-            auxiliary = this%low_candidate(component)%x( &
-                 a(1),a(2),a(3),a(4)) + this%edge_limiter(edge) * &
-                 this%correction_flux(component,edge) / &
-                 (this%graph%mass%x(a(1),a(2),a(3),a(4)) * weight)
-            this%limited_candidate(component)%x(a(1),a(2),a(3),a(4)) = &
-                 this%limited_candidate(component)%x( &
-                 a(1),a(2),a(3),a(4)) + &
-                 weight * auxiliary
-
-            degree = this%graph%directional_degree(direction)%x( &
-                 b(1),b(2),b(3),b(4))
-            weight = 1.0_rp / (real(this%graph%n_directions, rp) * degree)
-            auxiliary = this%low_candidate(component)%x( &
-                 b(1),b(2),b(3),b(4)) - this%edge_limiter(edge) * &
-                 this%correction_flux(component,edge) / &
-                 (this%graph%mass%x(b(1),b(2),b(3),b(4)) * weight)
-            this%limited_candidate(component)%x(b(1),b(2),b(3),b(4)) = &
-                 this%limited_candidate(component)%x( &
-                 b(1),b(2),b(3),b(4)) + &
-                 weight * auxiliary
-          end associate
-       end do
+       call this%graph%incidence(this%flux_x%x, &
+            this%correction_flux(component,:))
        call profiler_start_region('Euler IDP gather-scatter')
-       call gs%op(this%limited_candidate(component), GS_OP_ADD)
+       call gs%op(this%flux_x, GS_OP_ADD)
        call profiler_end_region('Euler IDP gather-scatter')
+       this%low_candidate(component)%x = this%low_candidate(component)%x + &
+            this%flux_x%x / this%graph%mass%x
     end do
     call profiler_end_region('Euler IDP correction asm')
   end subroutine euler_idp_cpu_apply_correction
@@ -1344,9 +1309,9 @@ contains
     type(euler_idp_state_observation_t), intent(out) :: observation
     type(field_t), intent(in), optional :: graph_wave_speed
 
-    call euler_idp_cpu_observe_state(this, this%limited_candidate(1), &
-         this%limited_candidate(2), this%limited_candidate(3), &
-         this%limited_candidate(4), this%limited_candidate(5), gs, gamma, &
+    call euler_idp_cpu_observe_state(this, this%low_candidate(1), &
+         this%low_candidate(2), this%low_candidate(3), &
+         this%low_candidate(4), this%low_candidate(5), gs, gamma, &
          internal_energy_floor, time, label, observation, graph_wave_speed, &
          primitives_valid)
   end subroutine euler_idp_cpu_observe_candidate
@@ -1360,9 +1325,9 @@ contains
     type(time_state_t), intent(in) :: time
     character(len=*), intent(in) :: label
 
-    call this%apply_boundary_conditions(this%limited_candidate(1), &
-         this%limited_candidate(2), this%limited_candidate(3), &
-         this%limited_candidate(4), this%limited_candidate(5), density_bcs, &
+    call this%apply_boundary_conditions(this%low_candidate(1), &
+         this%low_candidate(2), this%low_candidate(3), &
+         this%low_candidate(4), this%low_candidate(5), density_bcs, &
          velocity_bcs, pressure_bcs, gamma, internal_energy_floor, time, label)
   end subroutine euler_idp_cpu_apply_candidate_boundary
 
@@ -1381,12 +1346,12 @@ contains
     call profiler_start_region('Euler IDP diagnostics')
     local_bound_violation = 0.0_rp
     local_scale = 1.0_rp
-    if (this%limited_candidate(1)%size() .gt. 0) then
+    if (this%low_candidate(1)%size() .gt. 0) then
        local_bound_violation(1) = max(0.0_rp, maxval( &
-            this%density_lower_bound%x - this%limited_candidate(1)%x))
+            this%density_lower_bound%x - this%low_candidate(1)%x))
        local_bound_violation(2) = max(0.0_rp, maxval( &
-            this%limited_candidate(1)%x - this%density_upper_bound%x))
-       local_scale = max(1.0_rp, maxval(abs(this%limited_candidate(1)%x)), &
+            this%low_candidate(1)%x - this%density_upper_bound%x))
+       local_scale = max(1.0_rp, maxval(abs(this%low_candidate(1)%x)), &
             maxval(abs(this%density_lower_bound%x)), &
             maxval(abs(this%density_upper_bound%x)))
     end if
@@ -1400,12 +1365,12 @@ contains
     if (this%limit_entropy) then
        local_entropy_violation = 0.0_rp
        local_entropy_excess = 0.0_rp
-       do i = 1, this%limited_candidate(1)%size()
-          state = [this%limited_candidate(1)%x(i,1,1,1), &
-               this%limited_candidate(2)%x(i,1,1,1), &
-               this%limited_candidate(3)%x(i,1,1,1), &
-               this%limited_candidate(4)%x(i,1,1,1), &
-               this%limited_candidate(5)%x(i,1,1,1)]
+       do i = 1, this%low_candidate(1)%size()
+          state = [this%low_candidate(1)%x(i,1,1,1), &
+               this%low_candidate(2)%x(i,1,1,1), &
+               this%low_candidate(3)%x(i,1,1,1), &
+               this%low_candidate(4)%x(i,1,1,1), &
+               this%low_candidate(5)%x(i,1,1,1)]
           entropy = euler_idp_specific_entropy(state, gamma)
           local_entropy_violation = max(local_entropy_violation, &
                this%entropy_lower_bound%x(i,1,1,1) - entropy)
@@ -1424,15 +1389,15 @@ contains
 
     if (this%diagnostics_level .ne. EULER_IDP_DIAGNOSTICS_OFF) then
        local_minimum = huge(1.0_rp)
-       if (this%limited_candidate(1)%size() .gt. 0) then
-          local_minimum(1:3) = [minval(this%limited_candidate(1)%x), &
+       if (this%low_candidate(1)%size() .gt. 0) then
+          local_minimum(1:3) = [minval(this%low_candidate(1)%x), &
                minval(this%internal_energy%x), minval(this%p%x)]
-          do i = 1, this%limited_candidate(1)%size()
-             state = [this%limited_candidate(1)%x(i,1,1,1), &
-                  this%limited_candidate(2)%x(i,1,1,1), &
-                  this%limited_candidate(3)%x(i,1,1,1), &
-                  this%limited_candidate(4)%x(i,1,1,1), &
-                  this%limited_candidate(5)%x(i,1,1,1)]
+          do i = 1, this%low_candidate(1)%size()
+             state = [this%low_candidate(1)%x(i,1,1,1), &
+                  this%low_candidate(2)%x(i,1,1,1), &
+                  this%low_candidate(3)%x(i,1,1,1), &
+                  this%low_candidate(4)%x(i,1,1,1), &
+                  this%low_candidate(5)%x(i,1,1,1)]
              local_minimum(4) = min(local_minimum(4), &
                   euler_idp_specific_entropy(state, gamma))
           end do
@@ -1470,22 +1435,22 @@ contains
 
     call profiler_start_region('Euler IDP SSP combination')
     if (saved_weight .eq. 0.0_rp) then
-       rho%x = candidate_weight * this%limited_candidate(1)%x
-       m_x%x = candidate_weight * this%limited_candidate(2)%x
-       m_y%x = candidate_weight * this%limited_candidate(3)%x
-       m_z%x = candidate_weight * this%limited_candidate(4)%x
-       energy%x = candidate_weight * this%limited_candidate(5)%x
+       rho%x = candidate_weight * this%low_candidate(1)%x
+       m_x%x = candidate_weight * this%low_candidate(2)%x
+       m_y%x = candidate_weight * this%low_candidate(3)%x
+       m_z%x = candidate_weight * this%low_candidate(4)%x
+       energy%x = candidate_weight * this%low_candidate(5)%x
     else
        rho%x = saved_weight * this%saved_state(1)%x + &
-            candidate_weight * this%limited_candidate(1)%x
+            candidate_weight * this%low_candidate(1)%x
        m_x%x = saved_weight * this%saved_state(2)%x + &
-            candidate_weight * this%limited_candidate(2)%x
+            candidate_weight * this%low_candidate(2)%x
        m_y%x = saved_weight * this%saved_state(3)%x + &
-            candidate_weight * this%limited_candidate(3)%x
+            candidate_weight * this%low_candidate(3)%x
        m_z%x = saved_weight * this%saved_state(4)%x + &
-            candidate_weight * this%limited_candidate(4)%x
+            candidate_weight * this%low_candidate(4)%x
        energy%x = saved_weight * this%saved_state(5)%x + &
-            candidate_weight * this%limited_candidate(5)%x
+            candidate_weight * this%low_candidate(5)%x
     end if
     call profiler_end_region('Euler IDP SSP combination')
   end subroutine euler_idp_cpu_combine_stage
