@@ -76,7 +76,6 @@ module euler_idp_cpu
      real(kind=rp) :: correction_tolerance = 1.0e-10_rp
      type(euler_gll_graph_t) :: graph
      type(field_t) :: local_residual(EULER_IDP_NCOMP)
-     type(field_t) :: candidate(EULER_IDP_NCOMP)
      type(field_t) :: low_local_residual(EULER_IDP_NCOMP)
      type(field_t) :: low_assembled_residual(EULER_IDP_NCOMP)
      type(field_t) :: low_candidate(EULER_IDP_NCOMP)
@@ -237,13 +236,10 @@ contains
     this%diagnostics_level = diagnostics_level
     do component = 1, EULER_IDP_NCOMP
        call this%local_residual(component)%free()
-       call this%candidate(component)%free()
        call this%saved_state(component)%free()
        if (diagnostics_level .eq. EULER_IDP_DIAGNOSTICS_FULL) then
           write(name, '(A,I0)') 'euler_idp_local_', component
           call this%local_residual(component)%init(coef%dof, trim(name))
-          write(name, '(A,I0)') 'euler_idp_candidate_', component
-          call this%candidate(component)%init(coef%dof, trim(name))
        end if
        if (time_order .eq. 3) then
           write(name, '(A,I0)') 'euler_idp_saved_state_', component
@@ -394,7 +390,6 @@ contains
     call this%graph%free()
     do component = 1, EULER_IDP_NCOMP
        call this%local_residual(component)%free()
-       call this%candidate(component)%free()
        call this%low_local_residual(component)%free()
        call this%low_assembled_residual(component)%free()
        call this%low_candidate(component)%free()
@@ -941,7 +936,6 @@ contains
     integer, intent(in) :: stage
     type(field_t), intent(in), optional :: entropy_viscosity_fraction
     type(field_t), intent(in), optional :: graph_wave_speed
-    real(kind=rp) :: local_change(EULER_IDP_NCOMP)
     real(kind=rp) :: state(EULER_IDP_NCOMP), residual(EULER_IDP_NCOMP)
     real(kind=rp) :: local_floor_timestep, global_floor_timestep
     real(kind=rp) :: local_error, local_scale
@@ -1156,25 +1150,6 @@ contains
     end do
 
     if (this%diagnostics_level .eq. EULER_IDP_DIAGNOSTICS_FULL) then
-       do component = 1, EULER_IDP_NCOMP
-          call this%graph%incidence(this%flux_x%x, &
-               this%correction_flux(component,:))
-          call profiler_start_region('Euler IDP gather-scatter')
-          call gs%op(this%flux_x, GS_OP_ADD)
-          call profiler_end_region('Euler IDP gather-scatter')
-          this%candidate(component)%x = this%low_candidate(component)%x + &
-               this%flux_x%x / this%graph%mass%x
-          local_change(component) = 0.0_rp
-          if (rho%size() .gt. 0) then
-             local_scale = max(1.0_rp, maxval(abs(this%graph%mass%x * &
-                  (this%candidate(component)%x - &
-                  this%low_candidate(component)%x))))
-             local_change(component) = &
-                  maxval(abs(this%flux_x%x - this%graph%mass%x * &
-                  (this%candidate(component)%x - &
-                  this%low_candidate(component)%x))) / local_scale
-          end if
-       end do
        if (maxval(directional_error_local) .gt. &
             10.0_rp * this%correction_tolerance) then
           write(message, '(A,5(1X,ES13.6))') &
@@ -1182,12 +1157,7 @@ contains
                directional_error_local
           call neko_error(trim(message))
        end if
-       diagnostics%reconstruction_residual = local_change
-       if (maxval(local_change) .gt. &
-            10.0_rp * this%correction_tolerance) then
-          call neko_error('Euler IDP directional correction reconstruction ' // &
-               'failed')
-       end if
+       diagnostics%reconstruction_residual = directional_error_local
     end if
     call profiler_end_region('Euler IDP reconstruction')
 
