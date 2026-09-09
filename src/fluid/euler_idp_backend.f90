@@ -433,34 +433,125 @@ contains
     real(kind=rp), intent(in) :: residual(EULER_IDP_NCOMP)
     real(kind=rp), intent(in) :: internal_energy_floor
     real(kind=rp), intent(in) :: upper_bound
+    real(kind=rp) :: coefficient_a, coefficient_b, coefficient_c
+    real(kind=rp) :: scaled_a, scaled_b, scaled_c, coefficient_scale
+    real(kind=rp) :: discriminant, square_root, q
+    real(kind=rp) :: first_root, second_root, root
+    real(kind=rp) :: density_limit, linear_tolerance, discriminant_tolerance
     real(kind=rp) :: lower, upper, midpoint
     real(kind=rp) :: trial(EULER_IDP_NCOMP)
     integer :: iteration
+    logical :: analytic_root
 
-    dt_limit = upper_bound
+    dt_limit = max(0.0_rp, upper_bound)
+    if (dt_limit .le. 0.0_rp) return
+
+    ! Keep the density strictly positive. The downward margin also absorbs
+    ! rounding in the division that locates the density root.
     if (residual(1) .gt. 0.0_rp) then
-       dt_limit = min(dt_limit, state(1) / residual(1))
+       density_limit = state(1) / residual(1)
+       if (density_limit .le. dt_limit) then
+          dt_limit = max(0.0_rp, density_limit * &
+               (1.0_rp - 64.0_rp * epsilon(1.0_rp)))
+       end if
     end if
-    dt_limit = max(0.0_rp, dt_limit)
+    if (dt_limit .le. 0.0_rp) return
 
     trial = state - dt_limit * residual
-    if (trial(1) .gt. 0.0_rp) then
-       if (euler_idp_internal_energy(trial) .ge. &
-            internal_energy_floor) return
+    if (euler_idp_state_is_admissible(trial, internal_energy_floor)) return
+    if (.not. euler_idp_state_is_admissible(state, &
+         internal_energy_floor)) then
+       dt_limit = 0.0_rp
+       return
+    end if
+    upper = dt_limit
+
+    ! For U(t) = U - t R, multiply the internal-energy constraint by rho(t):
+    !   a*t**2 + b*t + c >= 0.
+    ! Scaling all coefficients equally makes the stable quadratic formula
+    ! insensitive to the absolute magnitude of the conserved state.
+    coefficient_a = residual(1) * residual(5) - &
+         0.5_rp * dot_product(residual(2:4), residual(2:4))
+    coefficient_b = -(state(1) * residual(5) + residual(1) * &
+         (state(5) - internal_energy_floor)) + &
+         dot_product(state(2:4), residual(2:4))
+    coefficient_c = state(1) * (state(5) - internal_energy_floor) - &
+         0.5_rp * dot_product(state(2:4), state(2:4))
+    coefficient_scale = max(abs(coefficient_a), abs(coefficient_b), &
+         abs(coefficient_c), tiny(1.0_rp))
+    analytic_root = all(ieee_is_finite([coefficient_a, coefficient_b, &
+         coefficient_c, coefficient_scale]))
+    root = huge(1.0_rp)
+
+    if (analytic_root) then
+       scaled_a = coefficient_a / coefficient_scale
+       scaled_b = coefficient_b / coefficient_scale
+       scaled_c = coefficient_c / coefficient_scale
+       linear_tolerance = 64.0_rp * epsilon(1.0_rp) * max( &
+            abs(scaled_b) / dt_limit, &
+            abs(scaled_c) / max(dt_limit * dt_limit, tiny(1.0_rp)), &
+            tiny(1.0_rp))
+
+       if (abs(scaled_a) .le. linear_tolerance) then
+          if (scaled_b .lt. 0.0_rp) then
+             root = -scaled_c / scaled_b
+          else
+             analytic_root = .false.
+          end if
+       else
+          discriminant = scaled_b * scaled_b - &
+               4.0_rp * scaled_a * scaled_c
+          discriminant_tolerance = 64.0_rp * epsilon(1.0_rp) * max( &
+               scaled_b * scaled_b, &
+               abs(4.0_rp * scaled_a * scaled_c), tiny(1.0_rp))
+          if (discriminant .lt. -discriminant_tolerance) then
+             analytic_root = .false.
+          else
+             discriminant = max(0.0_rp, discriminant)
+             square_root = sqrt(discriminant)
+             q = -0.5_rp * (scaled_b + sign(square_root, scaled_b))
+             first_root = huge(1.0_rp)
+             second_root = huge(1.0_rp)
+             if (abs(scaled_a) .gt. tiny(1.0_rp)) then
+                first_root = q / scaled_a
+             end if
+             if (abs(q) .gt. tiny(1.0_rp)) then
+                second_root = scaled_c / q
+             end if
+             if (first_root .gt. 0.0_rp .and. &
+                  first_root .le. dt_limit * (1.0_rp + &
+                  64.0_rp * epsilon(1.0_rp))) root = first_root
+             if (second_root .gt. 0.0_rp .and. &
+                  second_root .le. dt_limit * (1.0_rp + &
+                  64.0_rp * epsilon(1.0_rp))) then
+                root = min(root, second_root)
+             end if
+             if (coefficient_c .le. 0.0_rp .and. &
+                  (coefficient_b .lt. 0.0_rp .or. &
+                  (coefficient_b .eq. 0.0_rp .and. &
+                  coefficient_a .lt. 0.0_rp))) root = 0.0_rp
+             if (.not. ieee_is_finite(root) .or. &
+                  root .eq. huge(1.0_rp)) analytic_root = .false.
+          end if
+       end if
     end if
 
+    if (analytic_root) then
+       dt_limit = max(0.0_rp, min(dt_limit, root) * &
+            (1.0_rp - 64.0_rp * epsilon(1.0_rp)))
+       trial = state - dt_limit * residual
+       if (euler_idp_state_is_admissible(trial, &
+            internal_energy_floor)) return
+    end if
+
+    ! Degenerate or numerically ambiguous polynomials retain a robust fallback.
     lower = 0.0_rp
-    upper = dt_limit
     do iteration = 1, 64
        midpoint = 0.5_rp * (lower + upper)
        trial = state - midpoint * residual
-       if (trial(1) .gt. 0.0_rp) then
-          if (euler_idp_internal_energy(trial) .ge. &
-               internal_energy_floor) then
-             lower = midpoint
-          else
-             upper = midpoint
-          end if
+       if (euler_idp_state_is_admissible(trial, &
+            internal_energy_floor)) then
+          lower = midpoint
        else
           upper = midpoint
        end if

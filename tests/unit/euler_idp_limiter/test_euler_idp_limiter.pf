@@ -388,6 +388,97 @@ subroutine test_optional_entropy_constraint()
 end subroutine test_optional_entropy_constraint
 
 @test
+subroutine test_floor_timestep_linear_root()
+  use pfunit
+  use num_types, only : rp
+  use euler_idp_backend, only : euler_idp_internal_energy_timestep, &
+       euler_idp_state_is_admissible
+  implicit none
+
+  real(kind=rp) :: state(5), residual(5), trial(5), limit
+
+  state = [1.0_rp, 0.0_rp, 0.0_rp, 0.0_rp, 2.5_rp]
+  residual = [0.0_rp, 0.0_rp, 0.0_rp, 0.0_rp, 3.0_rp]
+  limit = euler_idp_internal_energy_timestep(state, residual, 0.5_rp, &
+       1.0_rp)
+  trial = state - limit * residual
+
+  @assertEqual(2.0_rp / 3.0_rp, limit, tolerance=1.0e-12_rp)
+  @assertTrue(euler_idp_state_is_admissible(trial, 0.5_rp))
+end subroutine test_floor_timestep_linear_root
+
+@test
+subroutine test_floor_timestep_quadratic_root()
+  use pfunit
+  use num_types, only : rp
+  use euler_idp_backend, only : euler_idp_internal_energy_timestep, &
+       euler_idp_state_is_admissible
+  implicit none
+
+  real(kind=rp) :: state(5), residual(5), trial(5), expected, limit
+
+  state = [1.0_rp, 0.0_rp, 0.0_rp, 0.0_rp, 2.5_rp]
+  residual = [0.0_rp, 2.0_rp, 0.0_rp, 0.0_rp, 1.0_rp]
+  expected = (sqrt(17.0_rp) - 1.0_rp) / 4.0_rp
+  limit = euler_idp_internal_energy_timestep(state, residual, 0.5_rp, &
+       1.0_rp)
+  trial = state - limit * residual
+
+  @assertEqual(expected, limit, tolerance=1.0e-12_rp)
+  @assertTrue(euler_idp_state_is_admissible(trial, 0.5_rp))
+end subroutine test_floor_timestep_quadratic_root
+
+@test
+subroutine test_floor_timestep_sweep_matches_bisection()
+  use pfunit
+  use num_types, only : rp
+  use euler_idp_backend, only : euler_idp_internal_energy_timestep, &
+       euler_idp_state_is_admissible
+  implicit none
+
+  real(kind=rp) :: state(5), residual(5), trial(5)
+  real(kind=rp) :: rho, velocity(3), internal_energy_floor
+  real(kind=rp) :: actual, reference, upper_bound
+  integer :: case_index
+  logical :: admissible
+
+  do case_index = 1, 400
+     rho = 0.2_rp + 0.01_rp * real(mod(17 * case_index, 180), rp)
+     velocity = [3.0_rp * sin(0.13_rp * real(case_index, rp)), &
+          2.0_rp * cos(0.19_rp * real(case_index, rp)), &
+          1.5_rp * sin(0.29_rp * real(case_index, rp))]
+     internal_energy_floor = 1.0e-4_rp * &
+          real(1 + mod(11 * case_index, 40), rp)
+     state(1) = rho
+     state(2:4) = rho * velocity
+     state(5) = internal_energy_floor + 0.05_rp + &
+          0.002_rp * real(mod(23 * case_index, 100), rp) + &
+          0.5_rp * dot_product(state(2:4), state(2:4)) / rho
+
+     residual(1) = rho * 1.8_rp * sin(0.31_rp * real(case_index, rp))
+     residual(2) = rho * 4.0_rp * cos(0.17_rp * real(case_index, rp))
+     residual(3) = rho * 3.0_rp * sin(0.37_rp * real(case_index, rp))
+     residual(4) = rho * 2.0_rp * cos(0.41_rp * real(case_index, rp))
+     residual(5) = state(5) * &
+          (0.2_rp + 2.0_rp * abs(sin(0.07_rp * real(case_index, rp))))
+     upper_bound = 0.2_rp + &
+          0.01_rp * real(mod(29 * case_index, 80), rp)
+
+     actual = euler_idp_internal_energy_timestep(state, residual, &
+          internal_energy_floor, upper_bound)
+     reference = reference_floor_timestep(state, residual, &
+          internal_energy_floor, upper_bound)
+     trial = state - actual * residual
+     admissible = euler_idp_state_is_admissible(trial, &
+          internal_energy_floor)
+
+     @assertTrue(actual .ge. 0.0_rp .and. actual .le. upper_bound)
+     @assertEqual(reference, actual, tolerance=1.0e-10_rp)
+     @assertTrue(admissible)
+  end do
+end subroutine test_floor_timestep_sweep_matches_bisection
+
+@test
 subroutine test_ssprk_stage_times()
   use pfunit
   use num_types, only : rp
@@ -450,5 +541,37 @@ pure function make_state(rho, velocity, pressure, gamma) result(state)
   state(5) = pressure / (gamma - 1.0_rp) + &
        0.5_rp * rho * velocity**2
 end function make_state
+
+pure function reference_floor_timestep(state, residual, &
+     internal_energy_floor, upper_bound) result(limit)
+  use num_types, only : rp
+  use euler_idp_backend, only : euler_idp_state_is_admissible
+  real(kind=rp), intent(in) :: state(5), residual(5)
+  real(kind=rp), intent(in) :: internal_energy_floor, upper_bound
+  real(kind=rp) :: limit, lower, upper, midpoint, trial(5)
+  integer :: iteration
+
+  upper = max(0.0_rp, upper_bound)
+  if (residual(1) .gt. 0.0_rp) then
+     upper = min(upper, state(1) / residual(1))
+  end if
+  trial = state - upper * residual
+  if (euler_idp_state_is_admissible(trial, internal_energy_floor)) then
+     limit = upper
+     return
+  end if
+
+  lower = 0.0_rp
+  do iteration = 1, 120
+     midpoint = 0.5_rp * (lower + upper)
+     trial = state - midpoint * residual
+     if (euler_idp_state_is_admissible(trial, internal_energy_floor)) then
+        lower = midpoint
+     else
+        upper = midpoint
+     end if
+  end do
+  limit = lower
+end function reference_floor_timestep
 
 end module test_euler_idp_limiter
