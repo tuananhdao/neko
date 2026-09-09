@@ -147,12 +147,14 @@ contains
     this%weight_x = coef%Xh%wx
     this%weight_y = coef%Xh%wy
     this%weight_z = coef%Xh%wz
-    allocate(this%reconstruction_work_1(this%lx, this%ly, this%lz, &
-         this%nelv))
-    this%reconstruction_work_1 = 0.0_rp
-    allocate(this%reconstruction_work_2(this%lx, this%ly, this%lz, &
-         this%nelv))
-    this%reconstruction_work_2 = 0.0_rp
+    if (.not. this%affine) then
+       allocate(this%reconstruction_work_1(this%lx, this%ly, this%lz, &
+            this%nelv))
+       this%reconstruction_work_1 = 0.0_rp
+       allocate(this%reconstruction_work_2(this%lx, this%ly, this%lz, &
+            this%nelv))
+       this%reconstruction_work_2 = 0.0_rp
+    end if
 
     edge = 0
     do e = 1, this%nelv

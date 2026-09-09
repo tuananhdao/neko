@@ -80,14 +80,9 @@ module euler_idp_cpu
      type(field_t) :: low_candidate(EULER_IDP_NCOMP)
      type(field_t) :: saved_state(EULER_IDP_NCOMP)
      type(field_t) :: viscosity_sum
-     type(field_t) :: limiter_weight_sum
      type(field_t) :: density_lower_bound
      type(field_t) :: density_upper_bound
-     type(field_t) :: stage_entropy
      type(field_t) :: entropy_lower_bound
-     type(field_t) :: density_second_difference
-     type(field_t) :: density_second_difference_average
-     type(field_t) :: rho
      type(field_t) :: u
      type(field_t) :: v
      type(field_t) :: w
@@ -154,7 +149,6 @@ contains
        call this%low_candidate(component)%init(dof, trim(name))
     end do
 
-    call this%rho%init(dof, 'euler_idp_rho')
     call this%u%init(dof, 'euler_idp_u')
     call this%v%init(dof, 'euler_idp_v')
     call this%w%init(dof, 'euler_idp_w')
@@ -165,7 +159,6 @@ contains
     call this%flux_y%init(dof, 'euler_idp_flux_y')
     call this%flux_z%init(dof, 'euler_idp_flux_z')
     call this%viscosity_sum%init(dof, 'euler_idp_viscosity_sum')
-    call this%limiter_weight_sum%init(dof, 'euler_idp_limiter_weight_sum')
     call this%density_lower_bound%init(dof, 'euler_idp_density_lower_bound')
     call this%density_upper_bound%init(dof, 'euler_idp_density_upper_bound')
     allocate(this%state_status(dof%size()))
@@ -229,20 +222,10 @@ contains
           call this%saved_state(component)%init(coef%dof, trim(name))
        end if
     end do
-    call this%stage_entropy%free()
     call this%entropy_lower_bound%free()
     if (limit_entropy) then
-       call this%stage_entropy%init(coef%dof, 'euler_idp_stage_entropy')
        call this%entropy_lower_bound%init(coef%dof, &
             'euler_idp_entropy_lower_bound')
-    end if
-    call this%density_second_difference%free()
-    call this%density_second_difference_average%free()
-    if (relax_density_bounds) then
-       call this%density_second_difference%init(coef%dof, &
-            'euler_idp_density_second_difference')
-       call this%density_second_difference_average%init(coef%dof, &
-            'euler_idp_density_second_difference_average')
     end if
     if (allocated(this%element_residual_sum)) then
        deallocate(this%element_residual_sum)
@@ -310,29 +293,29 @@ contains
        call neko_error('Euler IDP assembled mass and inverse are inconsistent')
     end if
 
-    this%limiter_weight_sum%x = 0.0_rp
+    this%flux_x%x = 0.0_rp
     do edge = 1, this%graph%n_edges
        associate(a => this%graph%left(:,edge), &
             b => this%graph%right(:,edge))
          direction = this%graph%direction(edge)
          ! Give every tensor direction the same total nodal weight. This
          ! preserves one-dimensional states across replicated element nodes.
-         this%limiter_weight_sum%x(a(1),a(2),a(3),a(4)) = &
-              this%limiter_weight_sum%x(a(1),a(2),a(3),a(4)) + &
+         this%flux_x%x(a(1),a(2),a(3),a(4)) = &
+              this%flux_x%x(a(1),a(2),a(3),a(4)) + &
               1.0_rp / (real(this%graph%n_directions, rp) * &
               this%graph%directional_degree(direction)%x( &
               a(1),a(2),a(3),a(4)))
-         this%limiter_weight_sum%x(b(1),b(2),b(3),b(4)) = &
-              this%limiter_weight_sum%x(b(1),b(2),b(3),b(4)) + &
+         this%flux_x%x(b(1),b(2),b(3),b(4)) = &
+              this%flux_x%x(b(1),b(2),b(3),b(4)) + &
               1.0_rp / (real(this%graph%n_directions, rp) * &
               this%graph%directional_degree(direction)%x( &
               b(1),b(2),b(3),b(4)))
        end associate
     end do
-    call gs%op(this%limiter_weight_sum, GS_OP_ADD)
+    call gs%op(this%flux_x, GS_OP_ADD)
     local_error = 0.0_rp
-    if (this%limiter_weight_sum%size() .gt. 0) then
-       local_error = maxval(abs(this%limiter_weight_sum%x - 1.0_rp))
+    if (this%flux_x%size() .gt. 0) then
+       local_error = maxval(abs(this%flux_x%x - 1.0_rp))
     end if
     call MPI_Allreduce(local_error, global_error, 1, MPI_REAL_PRECISION, &
          MPI_MAX, NEKO_COMM, ierr)
@@ -354,7 +337,6 @@ contains
        call this%low_candidate(component)%free()
        call this%saved_state(component)%free()
     end do
-    call this%rho%free()
     call this%u%free()
     call this%v%free()
     call this%w%free()
@@ -365,13 +347,9 @@ contains
     call this%flux_y%free()
     call this%flux_z%free()
     call this%viscosity_sum%free()
-    call this%limiter_weight_sum%free()
     call this%density_lower_bound%free()
     call this%density_upper_bound%free()
-    call this%stage_entropy%free()
     call this%entropy_lower_bound%free()
-    call this%density_second_difference%free()
-    call this%density_second_difference_average%free()
     if (allocated(this%element_residual_sum)) then
        deallocate(this%element_residual_sum)
     end if
@@ -691,16 +669,16 @@ contains
     this%density_lower_bound%x = rho%x
     this%density_upper_bound%x = rho%x
     if (this%relax_density_bounds) then
-       this%density_second_difference%x = 0.0_rp
+       this%flux_x%x = 0.0_rp
     end if
     if (this%limit_entropy) then
        do i = 1, rho%size()
           state = [rho%x(i,1,1,1), m_x%x(i,1,1,1), m_y%x(i,1,1,1), &
                m_z%x(i,1,1,1), energy%x(i,1,1,1)]
-          this%stage_entropy%x(i,1,1,1) = &
+          this%flux_z%x(i,1,1,1) = &
                euler_idp_specific_entropy(state, gamma)
        end do
-       call euler_idp_local_entropy_bounds(this%stage_entropy%x, &
+       call euler_idp_local_entropy_bounds(this%flux_z%x, &
             this%graph%left, this%graph%right, this%entropy_lower_bound%x)
     end if
     do edge = 1, this%graph%n_edges
@@ -743,11 +721,11 @@ contains
                  this%graph%directional_degree(direction)%x( &
                  b(1),b(2),b(3),b(4))
             difference = left_density - right_density
-            this%density_second_difference%x(a(1),a(2),a(3),a(4)) = &
-                 this%density_second_difference%x(a(1),a(2),a(3),a(4)) + &
+            this%flux_x%x(a(1),a(2),a(3),a(4)) = &
+                 this%flux_x%x(a(1),a(2),a(3),a(4)) + &
                  left_weight * difference
-            this%density_second_difference%x(b(1),b(2),b(3),b(4)) = &
-                 this%density_second_difference%x(b(1),b(2),b(3),b(4)) - &
+            this%flux_x%x(b(1),b(2),b(3),b(4)) = &
+                 this%flux_x%x(b(1),b(2),b(3),b(4)) - &
                  right_weight * difference
          end if
        end associate
@@ -759,7 +737,7 @@ contains
        call gs%op(this%entropy_lower_bound, GS_OP_MIN)
     end if
     if (this%relax_density_bounds) then
-       call gs%op(this%density_second_difference, GS_OP_ADD)
+       call gs%op(this%flux_x, GS_OP_ADD)
     end if
     call profiler_end_region('Euler IDP gather-scatter')
 
@@ -802,13 +780,13 @@ contains
     end if
 
     if (this%relax_density_bounds) then
-       this%density_second_difference_average%x = 0.0_rp
+       this%flux_y%x = 0.0_rp
        do edge = 1, this%graph%n_edges
           associate(a => this%graph%left(:,edge), &
                b => this%graph%right(:,edge))
             pair_average = 0.5_rp * ( &
-                 this%density_second_difference%x(a(1),a(2),a(3),a(4)) + &
-                 this%density_second_difference%x(b(1),b(2),b(3),b(4)))
+                 this%flux_x%x(a(1),a(2),a(3),a(4)) + &
+                 this%flux_x%x(b(1),b(2),b(3),b(4)))
             ! Apply the same occurrence normalization to the neighbour average.
             direction = this%graph%direction(edge)
             left_weight = 2.0_rp / &
@@ -817,28 +795,27 @@ contains
             right_weight = 2.0_rp / &
                  this%graph%directional_degree(direction)%x( &
                  b(1),b(2),b(3),b(4))
-            this%density_second_difference_average%x( &
+            this%flux_y%x( &
                  a(1),a(2),a(3),a(4)) = &
-                 this%density_second_difference_average%x( &
+                 this%flux_y%x( &
                  a(1),a(2),a(3),a(4)) + left_weight * pair_average
-            this%density_second_difference_average%x( &
+            this%flux_y%x( &
                  b(1),b(2),b(3),b(4)) = &
-                 this%density_second_difference_average%x( &
+                 this%flux_y%x( &
                  b(1),b(2),b(3),b(4)) + right_weight * pair_average
           end associate
        end do
        call profiler_start_region('Euler IDP gather-scatter')
-       call gs%op(this%density_second_difference_average, GS_OP_ADD)
+       call gs%op(this%flux_y, GS_OP_ADD)
        call profiler_end_region('Euler IDP gather-scatter')
-       this%density_second_difference_average%x = &
-            this%density_second_difference_average%x / &
+       this%flux_y%x = this%flux_y%x / &
             (2.0_rp * real(2 * this%graph%n_directions + 1, rp))
 
        do i = 1, rho%size()
           strict_lower = this%density_lower_bound%x(i,1,1,1)
           strict_upper = this%density_upper_bound%x(i,1,1,1)
           call euler_idp_relax_density_bounds(strict_lower, strict_upper, &
-               this%density_second_difference_average%x(i,1,1,1), &
+               this%flux_y%x(i,1,1,1), &
                this%density_bound_relaxation_factor, &
                this%density_relaxation_mass, this%domain_volume, &
                this%graph%n_directions, relaxed_lower, relaxed_upper)
@@ -1482,7 +1459,7 @@ contains
     this%viscosity_sum%x = 0.0_rp
     local_maximum = 0.0_rp
     if (rho%size() .gt. 0) then
-       local_minimum = [minval(this%rho%x), &
+       local_minimum = [minval(rho%x), &
             minval(this%internal_energy%x), minval(this%p%x)]
        local_maximum(1) = maxval(sqrt(this%u%x**2 + this%v%x**2 + &
             this%w%x**2) + this%sound_speed%x)
@@ -1568,7 +1545,7 @@ contains
     n = rho%size()
     call compressible_ops_cpu_conserved_to_primitive(rho%x, m_x%x, m_y%x, &
          m_z%x, energy%x, gamma, internal_energy_floor, &
-         this%rho%x, this%u%x, this%v%x, this%w%x, this%p%x, &
+         this%flux_x%x, this%u%x, this%v%x, this%w%x, this%p%x, &
          this%sound_speed%x, this%internal_energy%x, this%state_status, n)
     if (any(this%state_status .ne. EULER_STATE_OK)) then
        first_invalid = minloc(this%state_status, dim = 1, &
