@@ -1251,6 +1251,8 @@ contains
     real(kind=rp) :: local_scale
     integer :: i, ierr
 
+    if (this%diagnostics_level .eq. EULER_IDP_DIAGNOSTICS_OFF) return
+
     call profiler_start_region('Euler IDP diagnostics')
     local_bound_violation = 0.0_rp
     local_scale = 1.0_rp
