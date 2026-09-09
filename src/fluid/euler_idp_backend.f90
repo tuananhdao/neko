@@ -200,12 +200,14 @@ module euler_idp_backend
      end subroutine euler_idp_backend_boundary_intrf
 
      subroutine euler_idp_backend_prepare_intrf(this, rho, m_x, m_y, m_z, &
-          energy, gs, gamma, internal_energy_floor, graph_wave_speed)
+          energy, gs, gamma, internal_energy_floor, primitives_valid, &
+          graph_wave_speed)
        import :: euler_idp_backend_t, field_t, gs_t, rp
        class(euler_idp_backend_t), intent(inout) :: this
        type(field_t), intent(in) :: rho, m_x, m_y, m_z, energy
        type(gs_t), intent(inout) :: gs
        real(kind=rp), intent(in) :: gamma, internal_energy_floor
+       logical, intent(in) :: primitives_valid
        type(field_t), intent(in), optional :: graph_wave_speed
      end subroutine euler_idp_backend_prepare_intrf
 
@@ -240,7 +242,8 @@ module euler_idp_backend
      end subroutine euler_idp_backend_candidate_boundary_intrf
 
      subroutine euler_idp_backend_candidate_observe_intrf(this, gs, gamma, &
-          internal_energy_floor, time, label, observation, graph_wave_speed)
+          internal_energy_floor, time, label, primitives_valid, observation, &
+          graph_wave_speed)
        import :: euler_idp_backend_t, euler_idp_state_observation_t
        import :: field_t, gs_t, rp, time_state_t
        class(euler_idp_backend_t), intent(inout) :: this
@@ -248,6 +251,7 @@ module euler_idp_backend
        real(kind=rp), intent(in) :: gamma, internal_energy_floor
        type(time_state_t), intent(in) :: time
        character(len=*), intent(in) :: label
+       logical, intent(in) :: primitives_valid
        type(euler_idp_state_observation_t), intent(out) :: observation
        type(field_t), intent(in), optional :: graph_wave_speed
      end subroutine euler_idp_backend_candidate_observe_intrf

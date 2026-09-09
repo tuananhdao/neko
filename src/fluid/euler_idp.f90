@@ -277,7 +277,8 @@ contains
     if (.not. this%stage%graph_valid .or. &
          this%stage%prepared_epoch .ne. this%stage%state_epoch) then
        call this%backend%prepare_stage(rho, m_x, m_y, m_z, energy, gs, &
-            gamma, this%config%internal_energy_floor, graph_wave_speed)
+            gamma, this%config%internal_energy_floor, &
+            this%stage%primitive_valid, graph_wave_speed)
        this%stage%primitive_valid = .true.
        this%stage%graph_valid = .true.
        this%stage%prepared_epoch = this%stage%state_epoch
@@ -410,7 +411,8 @@ contains
     if (.not. this%stage%graph_valid .or. &
          this%stage%prepared_epoch .ne. this%stage%state_epoch) then
        call this%backend%prepare_stage(rho, m_x, m_y, m_z, energy, gs, &
-            gamma, this%config%internal_energy_floor, graph_wave_speed)
+            gamma, this%config%internal_energy_floor, &
+            this%stage%primitive_valid, graph_wave_speed)
        this%stage%primitive_valid = .true.
        this%stage%graph_valid = .true.
        this%stage%prepared_epoch = this%stage%state_epoch
@@ -440,7 +442,7 @@ contains
        call this%backend%observe_candidate(gs, gamma, &
             this%config%internal_energy_floor, time, &
             'candidate before boundary conditions', &
-            diagnostics%before_boundary, graph_wave_speed)
+            .false., diagnostics%before_boundary, graph_wave_speed)
     end if
     call this%backend%apply_candidate_boundary(density_bcs, velocity_bcs, &
          pressure_bcs, gamma, this%config%internal_energy_floor, time, &
@@ -448,8 +450,8 @@ contains
     if (this%config%diagnostics_level .eq. EULER_IDP_DIAGNOSTICS_FULL) then
        call this%backend%observe_candidate(gs, gamma, &
             this%config%internal_energy_floor, time, &
-            'candidate after boundary conditions', diagnostics%after_boundary, &
-            graph_wave_speed)
+            'candidate after boundary conditions', .true., &
+            diagnostics%after_boundary, graph_wave_speed)
     end if
     call this%backend%validate_candidate(gamma, diagnostics)
   end subroutine euler_idp_forward_euler_stage

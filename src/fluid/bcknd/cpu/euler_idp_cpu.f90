@@ -645,15 +645,18 @@ contains
 
   !> Prepare primitive and graph data for one immutable stage state.
   subroutine euler_idp_cpu_prepare_stage(this, rho, m_x, m_y, m_z, energy, &
-       gs, gamma, internal_energy_floor, graph_wave_speed)
+       gs, gamma, internal_energy_floor, primitives_valid, graph_wave_speed)
     class(euler_idp_cpu_t), intent(inout) :: this
     type(field_t), intent(in) :: rho, m_x, m_y, m_z, energy
     type(gs_t), intent(inout) :: gs
     real(kind=rp), intent(in) :: gamma, internal_energy_floor
+    logical, intent(in) :: primitives_valid
     type(field_t), intent(in), optional :: graph_wave_speed
 
-    call euler_idp_cpu_primitives(this, rho, m_x, m_y, m_z, energy, &
-         gamma, internal_energy_floor, 'prepared stage state')
+    if (.not. primitives_valid) then
+       call euler_idp_cpu_primitives(this, rho, m_x, m_y, m_z, energy, &
+            gamma, internal_energy_floor, 'prepared stage state')
+    end if
     call this%update_graph_viscosity(rho, m_x, m_y, m_z, energy, gs, gamma, &
          graph_wave_speed)
   end subroutine euler_idp_cpu_prepare_stage
@@ -1360,19 +1363,22 @@ contains
 
   !> Record diagnostics for the current limited candidate.
   subroutine euler_idp_cpu_observe_candidate(this, gs, gamma, &
-       internal_energy_floor, time, label, observation, graph_wave_speed)
+       internal_energy_floor, time, label, primitives_valid, observation, &
+       graph_wave_speed)
     class(euler_idp_cpu_t), intent(inout) :: this
     type(gs_t), intent(inout) :: gs
     real(kind=rp), intent(in) :: gamma, internal_energy_floor
     type(time_state_t), intent(in) :: time
     character(len=*), intent(in) :: label
+    logical, intent(in) :: primitives_valid
     type(euler_idp_state_observation_t), intent(out) :: observation
     type(field_t), intent(in), optional :: graph_wave_speed
 
     call euler_idp_cpu_observe_state(this, this%limited_candidate(1), &
          this%limited_candidate(2), this%limited_candidate(3), &
          this%limited_candidate(4), this%limited_candidate(5), gs, gamma, &
-         internal_energy_floor, time, label, observation, graph_wave_speed)
+         internal_energy_floor, time, label, observation, graph_wave_speed, &
+         primitives_valid)
   end subroutine euler_idp_cpu_observe_candidate
 
   !> Apply the strong boundary map to the current limited candidate.
@@ -1594,7 +1600,7 @@ contains
   !> Record admissibility and wave-speed data for one conserved state.
   subroutine euler_idp_cpu_observe_state(this, rho, m_x, m_y, m_z, energy, &
        gs, gamma, internal_energy_floor, time, label, observation, &
-       graph_wave_speed)
+       graph_wave_speed, primitives_valid)
     class(euler_idp_cpu_t), intent(inout) :: this
     type(field_t), intent(in) :: rho, m_x, m_y, m_z, energy
     type(gs_t), intent(inout) :: gs
@@ -1603,16 +1609,22 @@ contains
     character(len=*), intent(in) :: label
     type(euler_idp_state_observation_t), intent(out) :: observation
     type(field_t), intent(in), optional :: graph_wave_speed
+    logical, intent(in), optional :: primitives_valid
     real(kind=rp) :: left_state(EULER_IDP_NCOMP)
     real(kind=rp) :: right_state(EULER_IDP_NCOMP)
     real(kind=rp) :: normal(3), coefficient_norm, wave_speed
     real(kind=rp) :: local_minimum(3), global_minimum(3)
     real(kind=rp) :: local_maximum(3), global_maximum(3)
     integer :: edge, ierr
+    logical :: primitives_valid_
 
     call profiler_start_region('Euler IDP state audit')
-    call euler_idp_cpu_primitives(this, rho, m_x, m_y, m_z, energy, gamma, &
-         internal_energy_floor, label)
+    primitives_valid_ = .false.
+    if (present(primitives_valid)) primitives_valid_ = primitives_valid
+    if (.not. primitives_valid_) then
+       call euler_idp_cpu_primitives(this, rho, m_x, m_y, m_z, energy, &
+            gamma, internal_energy_floor, label)
+    end if
 
     this%viscosity_sum%x = 0.0_rp
     local_maximum = 0.0_rp
