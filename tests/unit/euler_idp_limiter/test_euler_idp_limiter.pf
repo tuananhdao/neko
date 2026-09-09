@@ -409,6 +409,36 @@ subroutine test_ssprk_stage_times()
   @assertEqual(1.9_rp, actual, tolerance=tolerance)
 end subroutine test_ssprk_stage_times
 
+@test
+subroutine test_stage_cache_invalidation()
+  use pfunit
+  use euler_idp, only : euler_idp_stage_t
+  implicit none
+
+  type(euler_idp_stage_t) :: stage
+
+  @assertFalse(stage%state_valid)
+  @assertFalse(stage%boundary_valid)
+  @assertFalse(stage%primitive_valid)
+  @assertFalse(stage%graph_valid)
+
+  call stage%state_changed()
+  @assertEqual(1, stage%state_epoch)
+  @assertTrue(stage%state_valid)
+  stage%prepared_epoch = stage%state_epoch
+  stage%boundary_valid = .true.
+  stage%primitive_valid = .true.
+  stage%graph_valid = .true.
+
+  call stage%state_changed()
+  @assertEqual(2, stage%state_epoch)
+  @assertEqual(-1, stage%prepared_epoch)
+  @assertTrue(stage%state_valid)
+  @assertFalse(stage%boundary_valid)
+  @assertFalse(stage%primitive_valid)
+  @assertFalse(stage%graph_valid)
+end subroutine test_stage_cache_invalidation
+
 pure function make_state(rho, velocity, pressure, gamma) result(state)
   use num_types, only : rp
   real(kind=rp), intent(in) :: rho, velocity, pressure, gamma
