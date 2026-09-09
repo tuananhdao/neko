@@ -44,7 +44,7 @@ module fluid_scheme_compressible_ns
   use fluid_scheme_compressible, only : fluid_scheme_compressible_t, &
        fluid_scheme_compressible_validate, &
        fluid_scheme_compressible_compute_cfl
-  use euler_idp_cpu, only : euler_idp_cpu_t
+  use euler_idp, only : euler_idp_t, EULER_IDP_DIAGNOSTICS_FULL
   use scratch_registry, only : neko_scratch_registry
   use gs_ops, only : GS_OP_ADD, GS_OP_MIN, GS_OP_MAX
   use gather_scatter, only : gs_t
@@ -84,7 +84,7 @@ module fluid_scheme_compressible_ns
      type(field_t) :: rho_res, m_x_res, m_y_res, m_z_res, m_E_res
      type(field_t) :: drho, dm_x, dm_y, dm_z, dE
      type(field_t) :: h
-     type(euler_idp_cpu_t) :: euler_idp_cpu
+     type(euler_idp_t) :: euler_idp_solver
      real(kind=rp) :: c_avisc_low
      class(advection_t), allocatable :: adv
      class(ax_t), allocatable :: Ax
@@ -172,13 +172,10 @@ contains
 
     call fluid_scheme_compressible_validate(this)
     if (this%euler_idp%enabled) then
-       call this%euler_idp_cpu%apply_boundary_conditions(this%rho, this%m_x, &
-            this%m_y, this%m_z, this%E, this%bcs_density, this%bcs_vel, &
-            this%bcs_prs, this%gamma, &
-            this%euler_idp%internal_energy_floor, &
-            label = 'initial state after boundary conditions')
-       call this%euler_idp_cpu%update_graph_viscosity(this%rho, this%m_x, &
-            this%m_y, this%m_z, this%E, this%gs_Xh, this%gamma)
+       call this%euler_idp_solver%invalidate()
+       call this%euler_idp_solver%prepare(this%rho, this%m_x, this%m_y, &
+            this%m_z, this%E, this%gs_Xh, this%bcs_density, this%bcs_vel, &
+            this%bcs_prs, this%gamma)
     end if
   end subroutine fluid_scheme_compressible_ns_validate
 
@@ -189,7 +186,7 @@ contains
     real(kind=rp) :: cfl
 
     if (this%euler_idp%enabled) then
-       cfl = this%euler_idp_cpu%graph_cfl(dt)
+       cfl = this%euler_idp_solver%cfl(dt)
     else
        cfl = fluid_scheme_compressible_compute_cfl(this, dt)
     end if
@@ -232,14 +229,11 @@ contains
 
     end associate
 
+    call json_get_or_default(params, 'case.numerics.time_order', rk_order, 4)
+
     if (this%euler_idp%enabled) then
-       call this%euler_idp_cpu%init(this%dm_Xh)
-       call this%euler_idp_cpu%init_graph(this%c_Xh, this%gs_Xh, &
-            this%euler_idp%relax_density_bounds, &
-            this%euler_idp%low_order_only, &
-            this%euler_idp%limit_internal_energy, &
-            this%euler_idp%limit_entropy, &
-            this%euler_idp%density_bound_relaxation_factor)
+       call this%euler_idp_solver%init(this%dm_Xh, this%c_Xh, this%gs_Xh, &
+            this%euler_idp, rk_order)
     end if
 
     if (NEKO_BCKND_DEVICE .eq. 1) then
@@ -279,7 +273,6 @@ contains
     call this%setup_regularization(params, user)
 
     ! Initialize Runge-Kutta scheme
-    call json_get_or_default(params, 'case.numerics.time_order', rk_order, 4)
     call this%rk_scheme%init(rk_order)
 
     call neko_log%section("Fluid boundary conditions")
@@ -316,7 +309,7 @@ contains
     call this%dm_z%free()
     call this%dE%free()
     call this%h%free()
-    call this%euler_idp_cpu%free()
+    call this%euler_idp_solver%free()
 
     if (allocated(this%regularization)) then
        call this%regularization%free()
@@ -517,18 +510,16 @@ contains
           end if
        end do
        if (reg%use_user_entropy_pair) then
-          call this%euler_idp_cpu%advance(this%rho, this%m_x, this%m_y, &
+          call this%euler_idp_solver%advance(this%rho, this%m_x, this%m_y, &
                this%m_z, this%E, this%c_Xh, this%gs_Xh, this%bcs_density, &
                this%bcs_vel, this%bcs_prs, this%gamma, &
-               this%euler_idp%internal_energy_floor, time%dt, &
-               this%rk_scheme%order, time, this%euler_idp_diagnostics, &
+               time%dt, time, this%euler_idp_diagnostics, &
                entropy_fraction, reg%entropy_wave_speed)
        else
-          call this%euler_idp_cpu%advance(this%rho, this%m_x, this%m_y, &
+          call this%euler_idp_solver%advance(this%rho, this%m_x, this%m_y, &
                this%m_z, this%E, this%c_Xh, this%gs_Xh, this%bcs_density, &
                this%bcs_vel, this%bcs_prs, this%gamma, &
-               this%euler_idp%internal_energy_floor, time%dt, &
-               this%rk_scheme%order, time, this%euler_idp_diagnostics, &
+               time%dt, time, this%euler_idp_diagnostics, &
                entropy_fraction)
        end if
     class default
@@ -537,10 +528,8 @@ contains
     call this%log_euler_idp_diagnostics(time)
     call neko_scratch_registry%relinquish_field(temp_indices)
 
-    this%u%x = this%euler_idp_cpu%u%x
-    this%v%x = this%euler_idp_cpu%v%x
-    this%w%x = this%euler_idp_cpu%w%x
-    this%p%x = this%euler_idp_cpu%p%x
+    call this%euler_idp_solver%copy_primitives(this%u, this%v, this%w, &
+         this%p)
     do concurrent (i = 1:n)
        this%temperature%x(i,1,1,1) = this%p%x(i,1,1,1) / &
             (this%rho%x(i,1,1,1) * (this%gamma - 1.0_rp))
@@ -560,13 +549,14 @@ contains
     select type (reg => this%regularization)
     type is (entropy_viscosity_t)
        if (reg%use_user_entropy_pair) then
-          call this%euler_idp_cpu%update_graph_viscosity(this%rho, &
-               this%m_x, this%m_y, this%m_z, this%E, this%gs_Xh, &
-               this%gamma, reg%entropy_wave_speed)
+          call this%euler_idp_solver%prepare(this%rho, this%m_x, this%m_y, &
+               this%m_z, this%E, this%gs_Xh, this%bcs_density, &
+               this%bcs_vel, this%bcs_prs, this%gamma, time, &
+               reg%entropy_wave_speed)
        else
-          call this%euler_idp_cpu%update_graph_viscosity(this%rho, &
-               this%m_x, this%m_y, this%m_z, this%E, this%gs_Xh, &
-               this%gamma)
+          call this%euler_idp_solver%prepare(this%rho, this%m_x, this%m_y, &
+               this%m_z, this%E, this%gs_Xh, this%bcs_density, &
+               this%bcs_vel, this%bcs_prs, this%gamma, time)
        end if
     class default
        call neko_error('Euler IDP requires entropy viscosity regularization')
@@ -595,87 +585,90 @@ contains
     character(len=LOG_SIZE) :: log_buf
     integer :: nstages, stage
 
+    if (this%euler_idp%diagnostics_level .ne. &
+         EULER_IDP_DIAGNOSTICS_FULL) return
+    if (mod(time%tstep, this%euler_idp%diagnostics_interval) .ne. 0) return
     nstages = 1
     if (this%rk_scheme%order .eq. 3) nstages = 3
     do stage = 1, nstages
        write(log_buf, '(A,I0,A,I0,A,ES10.3,A,ES10.3)') &
             'IDP limiter: step=', time%tstep, ' stage=', stage, &
             ' amin=', &
-            this%euler_idp_cpu%stage_diagnostics(stage)%min_limiter, &
-            ' frac=', this%euler_idp_cpu%stage_diagnostics( &
+            this%euler_idp_solver%stage_diagnostics(stage)%min_limiter, &
+            ' frac=', this%euler_idp_solver%stage_diagnostics( &
             stage)%limited_edge_fraction
        call neko_log%message(log_buf, lvl = NEKO_LOG_VERBOSE)
 
        write(log_buf, '(A,ES10.3,A,ES10.3,A,ES10.3)') &
             'IDP state: rho_min=', &
-            this%euler_idp_cpu%stage_diagnostics(stage)%min_density, &
+            this%euler_idp_solver%stage_diagnostics(stage)%min_density, &
             ' p_min=', &
-            this%euler_idp_cpu%stage_diagnostics(stage)%min_pressure, &
+            this%euler_idp_solver%stage_diagnostics(stage)%min_pressure, &
             ' e_min=', &
-            this%euler_idp_cpu%stage_diagnostics(stage)%min_internal_energy
+            this%euler_idp_solver%stage_diagnostics(stage)%min_internal_energy
        call neko_log%message(log_buf, lvl = NEKO_LOG_VERBOSE)
 
        write(log_buf, '(A,ES10.3,A,ES10.3,A,ES10.3)') &
             'IDP graph: t=', &
-            this%euler_idp_cpu%stage_diagnostics(stage)%stage_time, &
+            this%euler_idp_solver%stage_diagnostics(stage)%stage_time, &
             ' wave=', &
-            this%euler_idp_cpu%stage_diagnostics(stage)%max_graph_wave_speed, &
+            this%euler_idp_solver%stage_diagnostics(stage)%max_graph_wave_speed, &
             ' rate=', &
-            this%euler_idp_cpu%stage_diagnostics(stage)%max_graph_rate
+            this%euler_idp_solver%stage_diagnostics(stage)%max_graph_rate
        call neko_log%message(log_buf, lvl = NEKO_LOG_VERBOSE)
 
        write(log_buf, '(A,ES10.3,A,ES10.3,A,ES10.3)') &
             'IDP timestep: nodal_wave=', &
-            this%euler_idp_cpu%stage_diagnostics(stage)% &
+            this%euler_idp_solver%stage_diagnostics(stage)% &
             max_nodal_wave_speed, ' graph_cfl=', &
-            this%euler_idp_cpu%stage_diagnostics(stage)%max_graph_cfl, &
+            this%euler_idp_solver%stage_diagnostics(stage)%max_graph_cfl, &
             ' dt_floor=', &
-            this%euler_idp_cpu%stage_diagnostics(stage)%maximum_floor_timestep
+            this%euler_idp_solver%stage_diagnostics(stage)%maximum_floor_timestep
        call neko_log%message(log_buf, lvl = NEKO_LOG_VERBOSE)
 
        write(log_buf, '(A,3(A,ES10.3))') 'IDP boundary pre:', &
-            ' rho=', this%euler_idp_cpu%stage_diagnostics(stage)% &
+            ' rho=', this%euler_idp_solver%stage_diagnostics(stage)% &
             before_boundary%min_density, &
-            ' p=', this%euler_idp_cpu%stage_diagnostics(stage)% &
+            ' p=', this%euler_idp_solver%stage_diagnostics(stage)% &
             before_boundary%min_pressure, &
-            ' e=', this%euler_idp_cpu%stage_diagnostics(stage)% &
+            ' e=', this%euler_idp_solver%stage_diagnostics(stage)% &
             before_boundary%min_internal_energy
        call neko_log%message(log_buf, lvl = NEKO_LOG_VERBOSE)
 
        write(log_buf, '(A,3(A,ES10.3))') 'IDP boundary pre:', &
-            ' nodal=', this%euler_idp_cpu%stage_diagnostics(stage)% &
+            ' nodal=', this%euler_idp_solver%stage_diagnostics(stage)% &
             before_boundary%max_nodal_wave_speed, &
-            ' graph=', this%euler_idp_cpu%stage_diagnostics(stage)% &
+            ' graph=', this%euler_idp_solver%stage_diagnostics(stage)% &
             before_boundary%max_graph_wave_speed, &
-            ' rate=', this%euler_idp_cpu%stage_diagnostics(stage)% &
+            ' rate=', this%euler_idp_solver%stage_diagnostics(stage)% &
             before_boundary%max_graph_rate
        call neko_log%message(log_buf, lvl = NEKO_LOG_VERBOSE)
 
        write(log_buf, '(A,3(A,ES10.3))') 'IDP boundary post:', &
-            ' rho=', this%euler_idp_cpu%stage_diagnostics(stage)% &
+            ' rho=', this%euler_idp_solver%stage_diagnostics(stage)% &
             after_boundary%min_density, &
-            ' p=', this%euler_idp_cpu%stage_diagnostics(stage)% &
+            ' p=', this%euler_idp_solver%stage_diagnostics(stage)% &
             after_boundary%min_pressure, &
-            ' e=', this%euler_idp_cpu%stage_diagnostics(stage)% &
+            ' e=', this%euler_idp_solver%stage_diagnostics(stage)% &
             after_boundary%min_internal_energy
        call neko_log%message(log_buf, lvl = NEKO_LOG_VERBOSE)
 
        write(log_buf, '(A,3(A,ES10.3))') 'IDP boundary post:', &
-            ' nodal=', this%euler_idp_cpu%stage_diagnostics(stage)% &
+            ' nodal=', this%euler_idp_solver%stage_diagnostics(stage)% &
             after_boundary%max_nodal_wave_speed, &
-            ' graph=', this%euler_idp_cpu%stage_diagnostics(stage)% &
+            ' graph=', this%euler_idp_solver%stage_diagnostics(stage)% &
             after_boundary%max_graph_wave_speed, &
-            ' rate=', this%euler_idp_cpu%stage_diagnostics(stage)% &
+            ' rate=', this%euler_idp_solver%stage_diagnostics(stage)% &
             after_boundary%max_graph_rate
        call neko_log%message(log_buf, lvl = NEKO_LOG_VERBOSE)
 
        write(log_buf, '(A,I0,A,I0,A,I0)') &
             'IDP edges: rho=', &
-            this%euler_idp_cpu%stage_diagnostics( &
+            this%euler_idp_solver%stage_diagnostics( &
             stage)%density_limited_edges, ' energy=', &
-            this%euler_idp_cpu%stage_diagnostics( &
+            this%euler_idp_solver%stage_diagnostics( &
             stage)%internal_energy_limited_edges, ' entropy=', &
-            this%euler_idp_cpu%stage_diagnostics( &
+            this%euler_idp_solver%stage_diagnostics( &
             stage)%entropy_limited_edges
        call neko_log%message(log_buf, lvl = NEKO_LOG_VERBOSE)
     end do

@@ -5,7 +5,7 @@ contains
 subroutine test_zero_viscosity_bar_state()
   use pfunit
   use num_types, only : rp
-  use euler_idp_low_order, only : euler_idp_bar_state
+  use euler_idp_backend, only : euler_idp_bar_state
   implicit none
 
   real(kind=rp) :: left(5), right(5), flux_difference(5), bar_state(5)
@@ -24,7 +24,7 @@ end subroutine test_zero_viscosity_bar_state
 subroutine test_specific_entropy()
   use pfunit
   use num_types, only : rp
-  use euler_idp_limiter, only : euler_idp_specific_entropy
+  use euler_idp_backend, only : euler_idp_specific_entropy
   implicit none
 
   real(kind=rp), parameter :: gamma = 1.4_rp
@@ -40,7 +40,7 @@ end subroutine test_specific_entropy
 subroutine test_high_mach_entropy_roundoff()
   use pfunit
   use num_types, only : rp
-  use euler_idp_limiter, only : euler_idp_entropy_is_admissible
+  use euler_idp_backend, only : euler_idp_entropy_is_admissible
   implicit none
 
   real(kind=rp), parameter :: gamma = 1.4_rp
@@ -63,7 +63,7 @@ end subroutine test_high_mach_entropy_roundoff
 subroutine test_local_entropy_bounds_are_edge_order_independent()
   use pfunit
   use num_types, only : rp
-  use euler_idp_limiter, only : euler_idp_local_entropy_bounds
+  use euler_idp_backend, only : euler_idp_local_entropy_bounds
   implicit none
 
   real(kind=rp) :: stage_entropy(4,1,1,1)
@@ -100,7 +100,7 @@ end subroutine test_local_entropy_bounds_are_edge_order_independent
 subroutine test_density_bound_relaxation_factor()
   use pfunit
   use num_types, only : rp
-  use euler_idp_limiter, only : euler_idp_relax_density_bounds
+  use euler_idp_backend, only : euler_idp_relax_density_bounds
   implicit none
 
   real(kind=rp) :: relaxed_lower, relaxed_upper
@@ -116,7 +116,7 @@ end subroutine test_density_bound_relaxation_factor
 subroutine test_entropy_endpoint_limit()
   use pfunit
   use num_types, only : rp
-  use euler_idp_limiter, only : euler_idp_limit_endpoint, &
+  use euler_idp_backend, only : euler_idp_limit_endpoint, &
        euler_idp_specific_entropy
   implicit none
 
@@ -144,7 +144,7 @@ end subroutine test_entropy_endpoint_limit
 subroutine test_entropy_boundary_outward_limit()
   use pfunit
   use num_types, only : rp
-  use euler_idp_limiter, only : euler_idp_limit_endpoint
+  use euler_idp_backend, only : euler_idp_limit_endpoint
   implicit none
 
   real(kind=rp), parameter :: gamma = 1.4_rp
@@ -165,7 +165,7 @@ end subroutine test_entropy_boundary_outward_limit
 subroutine test_newton_secant_matches_bisection()
   use pfunit
   use num_types, only : rp
-  use euler_idp_limiter, only : euler_idp_entropy_is_admissible, &
+  use euler_idp_backend, only : euler_idp_entropy_is_admissible, &
        euler_idp_limit_endpoint
   implicit none
 
@@ -210,7 +210,7 @@ end subroutine test_newton_secant_matches_bisection
 subroutine test_internal_energy_floor_limit()
   use pfunit
   use num_types, only : rp
-  use euler_idp_limiter, only : euler_idp_limit_endpoint, &
+  use euler_idp_backend, only : euler_idp_limit_endpoint, &
        euler_idp_state_is_admissible
   implicit none
 
@@ -238,7 +238,7 @@ end subroutine test_internal_energy_floor_limit
 subroutine test_endpoint_sweep_matches_bisection()
   use pfunit
   use num_types, only : rp
-  use euler_idp_limiter, only : euler_idp_entropy_is_admissible, &
+  use euler_idp_backend, only : euler_idp_entropy_is_admissible, &
        euler_idp_limit_endpoint, euler_idp_specific_entropy
   implicit none
 
@@ -293,7 +293,7 @@ end subroutine test_endpoint_sweep_matches_bisection
 subroutine test_symmetric_edge_entropy_limit()
   use pfunit
   use num_types, only : rp
-  use euler_idp_limiter, only : euler_idp_limit_edge
+  use euler_idp_backend, only : euler_idp_limit_edge
   implicit none
 
   real(kind=rp), parameter :: gamma = 1.4_rp
@@ -318,7 +318,7 @@ end subroutine test_symmetric_edge_entropy_limit
 subroutine test_optional_internal_energy_constraint()
   use pfunit
   use num_types, only : rp
-  use euler_idp_limiter, only : euler_idp_limit_endpoint
+  use euler_idp_backend, only : euler_idp_limit_endpoint
   implicit none
 
   real(kind=rp), parameter :: gamma = 1.4_rp
@@ -342,7 +342,7 @@ end subroutine test_optional_internal_energy_constraint
 subroutine test_optional_internal_energy_constraint_on_base()
   use pfunit
   use num_types, only : rp
-  use euler_idp_limiter, only : euler_idp_limit_endpoint
+  use euler_idp_backend, only : euler_idp_limit_endpoint
   implicit none
 
   real(kind=rp), parameter :: gamma = 1.4_rp
@@ -367,7 +367,7 @@ end subroutine test_optional_internal_energy_constraint_on_base
 subroutine test_optional_entropy_constraint()
   use pfunit
   use num_types, only : rp
-  use euler_idp_limiter, only : euler_idp_limit_endpoint
+  use euler_idp_backend, only : euler_idp_limit_endpoint
   implicit none
 
   real(kind=rp), parameter :: gamma = 1.4_rp
