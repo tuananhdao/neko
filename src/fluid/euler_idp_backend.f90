@@ -751,7 +751,7 @@ contains
   pure subroutine euler_idp_limit_endpoint(base, correction, density_lower, &
        density_upper, entropy_lower, gamma, internal_energy_floor, limit, &
        density_limited, energy_limited, entropy_limited, &
-       enforce_internal_energy, enforce_entropy)
+       enforce_internal_energy, enforce_entropy, check_base_constraints)
     real(kind=rp), intent(in) :: base(EULER_IDP_NCOMP)
     real(kind=rp), intent(in) :: correction(EULER_IDP_NCOMP)
     real(kind=rp), intent(in) :: density_lower, density_upper, entropy_lower
@@ -759,8 +759,10 @@ contains
     real(kind=rp), intent(out) :: limit
     logical, intent(out) :: density_limited, energy_limited, entropy_limited
     logical, intent(in), optional :: enforce_internal_energy, enforce_entropy
+    logical, intent(in), optional :: check_base_constraints
     real(kind=rp) :: trial(EULER_IDP_NCOMP)
     logical :: enforce_energy_constraint, enforce_entropy_constraint
+    logical :: validate_base
 
     enforce_energy_constraint = .true.
     enforce_entropy_constraint = .true.
@@ -770,35 +772,41 @@ contains
     if (present(enforce_entropy)) then
        enforce_entropy_constraint = enforce_entropy
     end if
+    validate_base = .true.
+    if (present(check_base_constraints)) then
+       validate_base = check_base_constraints
+    end if
     limit = 1.0_rp
     density_limited = .false.
     energy_limited = .false.
     entropy_limited = .false.
-    if (.not. all(ieee_is_finite(base))) then
-       limit = 0.0_rp
-       energy_limited = enforce_energy_constraint
-       entropy_limited = enforce_entropy_constraint
-       return
-    end if
-    if (base(1) .le. 0.0_rp .or. base(1) .lt. density_lower .or. &
-         base(1) .gt. density_upper) then
-       limit = 0.0_rp
-       density_limited = .true.
-       return
-    end if
-    if (enforce_energy_constraint .and. &
-         .not. euler_idp_state_is_admissible(base, &
-         internal_energy_floor)) then
-       limit = 0.0_rp
-       energy_limited = .true.
-       return
-    end if
-    if (enforce_entropy_constraint .and. &
-         .not. euler_idp_entropy_is_admissible(base, gamma, entropy_lower, &
-         internal_energy_floor)) then
-       limit = 0.0_rp
-       entropy_limited = .true.
-       return
+    if (validate_base) then
+       if (.not. all(ieee_is_finite(base))) then
+          limit = 0.0_rp
+          energy_limited = enforce_energy_constraint
+          entropy_limited = enforce_entropy_constraint
+          return
+       end if
+       if (base(1) .le. 0.0_rp .or. base(1) .lt. density_lower .or. &
+            base(1) .gt. density_upper) then
+          limit = 0.0_rp
+          density_limited = .true.
+          return
+       end if
+       if (enforce_energy_constraint .and. &
+            .not. euler_idp_state_is_admissible(base, &
+            internal_energy_floor)) then
+          limit = 0.0_rp
+          energy_limited = .true.
+          return
+       end if
+       if (enforce_entropy_constraint .and. &
+            .not. euler_idp_entropy_is_admissible(base, gamma, &
+            entropy_lower, internal_energy_floor)) then
+          limit = 0.0_rp
+          entropy_limited = .true.
+          return
+       end if
     end if
 
     if (correction(1) .lt. 0.0_rp) then
@@ -1010,7 +1018,8 @@ contains
        left_density_upper, right_density_lower, right_density_upper, &
        left_entropy_lower, right_entropy_lower, gamma, &
        internal_energy_floor, limit, density_limited, energy_limited, &
-       entropy_limited, enforce_internal_energy, enforce_entropy)
+       entropy_limited, enforce_internal_energy, enforce_entropy, &
+       check_base_constraints)
     real(kind=rp), intent(in) :: left_base(EULER_IDP_NCOMP)
     real(kind=rp), intent(in) :: right_base(EULER_IDP_NCOMP)
     real(kind=rp), intent(in) :: left_correction(EULER_IDP_NCOMP)
@@ -1022,6 +1031,7 @@ contains
     real(kind=rp), intent(out) :: limit
     logical, intent(out) :: density_limited, energy_limited, entropy_limited
     logical, intent(in), optional :: enforce_internal_energy, enforce_entropy
+    logical, intent(in), optional :: check_base_constraints
     real(kind=rp) :: left_limit, right_limit
     logical :: left_density_limited, right_density_limited
     logical :: left_energy_limited, right_energy_limited
@@ -1031,12 +1041,13 @@ contains
          left_density_lower, left_density_upper, left_entropy_lower, gamma, &
          internal_energy_floor, left_limit, &
          left_density_limited, left_energy_limited, left_entropy_limited, &
-         enforce_internal_energy, enforce_entropy)
+         enforce_internal_energy, enforce_entropy, check_base_constraints)
     call euler_idp_limit_endpoint(right_base, right_correction, &
          right_density_lower, right_density_upper, right_entropy_lower, &
          gamma, internal_energy_floor, right_limit, &
          right_density_limited, right_energy_limited, &
-         right_entropy_limited, enforce_internal_energy, enforce_entropy)
+         right_entropy_limited, enforce_internal_energy, enforce_entropy, &
+         check_base_constraints)
     limit = min(left_limit, right_limit)
     density_limited = left_density_limited .or. right_density_limited
     energy_limited = left_energy_limited .or. right_energy_limited

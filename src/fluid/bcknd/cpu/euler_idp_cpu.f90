@@ -1092,10 +1092,13 @@ contains
     integer :: local_count(5), global_count(5)
     integer :: direction, edge, component, ierr
     logical :: density_limited, energy_limited, entropy_limited
+    logical :: check_base_constraints
 
     call profiler_start_region('Euler IDP vector limiter')
     local_minimum = 1.0_rp
     local_count = 0
+    check_base_constraints = &
+         this%diagnostics_level .ne. EULER_IDP_DIAGNOSTICS_OFF
     do edge = 1, this%graph%n_edges
        associate(a => this%graph%left(:,edge), &
             b => this%graph%right(:,edge))
@@ -1135,7 +1138,8 @@ contains
               left_entropy_bound, right_entropy_bound, gamma, &
               internal_energy_floor, edge_limit, &
               density_limited, energy_limited, entropy_limited, &
-              this%limit_internal_energy, this%limit_entropy)
+              this%limit_internal_energy, this%limit_entropy, &
+              check_base_constraints)
        end associate
        if (this%diagnostics_level .ne. EULER_IDP_DIAGNOSTICS_OFF) then
           if (.not. ieee_is_finite(edge_limit) .or. &

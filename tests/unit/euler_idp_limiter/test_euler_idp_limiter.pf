@@ -315,6 +315,39 @@ subroutine test_symmetric_edge_entropy_limit()
 end subroutine test_symmetric_edge_entropy_limit
 
 @test
+subroutine test_valid_base_fast_path_matches_checked_limiter()
+  use pfunit
+  use num_types, only : rp
+  use euler_idp_backend, only : euler_idp_limit_edge
+  implicit none
+
+  real(kind=rp), parameter :: gamma = 1.4_rp
+  real(kind=rp) :: left(5), right(5), left_correction(5)
+  real(kind=rp) :: right_correction(5), checked_limit, fast_limit
+  logical :: checked_density, checked_energy, checked_entropy
+  logical :: fast_density, fast_energy, fast_entropy
+
+  left = make_state(1.0_rp, 0.2_rp, 1.0_rp, gamma)
+  right = make_state(1.1_rp, -0.1_rp, 0.9_rp, gamma)
+  left_correction = make_state(1.4_rp, 1.2_rp, 0.05_rp, gamma) - left
+  right_correction = -left_correction
+  call euler_idp_limit_edge(left, right, left_correction, &
+       right_correction, 0.5_rp, 1.5_rp, 0.5_rp, 1.5_rp, &
+       log(0.5_rp), log(0.5_rp), gamma, 1.0e-12_rp, checked_limit, &
+       checked_density, checked_energy, checked_entropy)
+  call euler_idp_limit_edge(left, right, left_correction, &
+       right_correction, 0.5_rp, 1.5_rp, 0.5_rp, 1.5_rp, &
+       log(0.5_rp), log(0.5_rp), gamma, 1.0e-12_rp, fast_limit, &
+       fast_density, fast_energy, fast_entropy, &
+       check_base_constraints = .false.)
+
+  @assertEqual(checked_limit, fast_limit, tolerance=1.0e-14_rp)
+  @assertEqual(checked_density, fast_density)
+  @assertEqual(checked_energy, fast_energy)
+  @assertEqual(checked_entropy, fast_entropy)
+end subroutine test_valid_base_fast_path_matches_checked_limiter
+
+@test
 subroutine test_optional_internal_energy_constraint()
   use pfunit
   use num_types, only : rp
