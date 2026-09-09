@@ -42,13 +42,14 @@ module euler_idp_cpu
   use bc_list, only : bc_list_t
   use time_state, only : time_state_t
   use gs_ops, only : GS_OP_ADD, GS_OP_MIN, GS_OP_MAX
+  use bc, only : bc_t
   use compressible_ops_cpu, only : &
        compressible_ops_cpu_conserved_to_primitive, &
        compressible_ops_cpu_update_uvw, &
        compressible_ops_cpu_update_mxyz_p_ruvw, &
        compressible_ops_cpu_update_e, EULER_STATE_OK
   use euler_idp, only : EULER_IDP_NCOMP, euler_idp_diagnostics_t, &
-       euler_idp_state_observation_t
+       euler_idp_state_observation_t, euler_idp_stage_time
   use euler_idp_low_order, only : euler_idp_maximum_wave_speed, &
        euler_idp_flux_dot_vector, euler_idp_bar_state, &
        euler_idp_internal_energy, euler_idp_internal_energy_timestep
@@ -1276,15 +1277,19 @@ contains
     type(euler_idp_diagnostics_t), intent(out) :: diagnostics
     type(field_t), intent(in), optional :: entropy_viscosity_fraction
     type(field_t), intent(in), optional :: graph_wave_speed
+    type(time_state_t) :: stage_time
     integer :: component
 
     if (order .ne. 1 .and. order .ne. 3) then
        call neko_error('Euler IDP requires Forward Euler or SSPRK3')
     end if
 
+    stage_time = time
+    stage_time%t = euler_idp_stage_time(time%t, dt, order, 1)
     call this%apply_boundary_conditions(rho, m_x, m_y, m_z, energy, &
          density_bcs, velocity_bcs, pressure_bcs, gamma, &
-         internal_energy_floor, time, 'stage input after boundary conditions')
+         internal_energy_floor, stage_time, &
+         'stage input after boundary conditions', refresh = .true.)
 
     do component = 1, 3
        call this%stage_diagnostics(component)%reset()
@@ -1298,19 +1303,32 @@ contains
     end if
     call this%forward_euler(rho, m_x, m_y, m_z, energy, coef, gs, &
          density_bcs, velocity_bcs, pressure_bcs, gamma, &
-         internal_energy_floor, dt, time, this%stage_diagnostics(1), 1, &
+         internal_energy_floor, dt, stage_time, &
+         this%stage_diagnostics(1), 1, &
          entropy_viscosity_fraction, graph_wave_speed)
     if (order .eq. 1) then
        call this%commit(rho, m_x, m_y, m_z, energy)
+       call this%apply_boundary_conditions(rho, m_x, m_y, m_z, energy, &
+            density_bcs, velocity_bcs, pressure_bcs, gamma, &
+            internal_energy_floor, time, &
+            'Forward Euler final state after boundary conditions', &
+            refresh = .true.)
        diagnostics = this%stage_diagnostics(1)
        return
     end if
 
     ! U(1) = FE(U(n)).
     call this%commit(rho, m_x, m_y, m_z, energy)
+    stage_time = time
+    stage_time%t = euler_idp_stage_time(time%t, dt, order, 2)
+    call this%apply_boundary_conditions(rho, m_x, m_y, m_z, energy, &
+         density_bcs, velocity_bcs, pressure_bcs, gamma, &
+         internal_energy_floor, stage_time, &
+         'SSPRK3 stage 2 input after boundary conditions', refresh = .true.)
     call this%forward_euler(rho, m_x, m_y, m_z, energy, coef, gs, &
          density_bcs, velocity_bcs, pressure_bcs, gamma, &
-         internal_energy_floor, dt, time, this%stage_diagnostics(2), 2, &
+         internal_energy_floor, dt, stage_time, &
+         this%stage_diagnostics(2), 2, &
          entropy_viscosity_fraction, graph_wave_speed)
 
     ! U(2) = 3/4 U(n) + 1/4 FE(U(1)).
@@ -1326,13 +1344,16 @@ contains
     energy%x = 0.75_rp * this%saved_state(5)%x + &
          0.25_rp * this%limited_candidate(5)%x
     call profiler_end_region('Euler IDP SSP combination')
+    stage_time = time
+    stage_time%t = euler_idp_stage_time(time%t, dt, order, 3)
     call this%apply_boundary_conditions(rho, m_x, m_y, m_z, energy, &
          density_bcs, velocity_bcs, pressure_bcs, gamma, &
-         internal_energy_floor, time, &
-         'SSPRK3 stage 2 after boundary conditions')
+         internal_energy_floor, stage_time, &
+         'SSPRK3 stage 3 input after boundary conditions', refresh = .true.)
     call this%forward_euler(rho, m_x, m_y, m_z, energy, coef, gs, &
          density_bcs, velocity_bcs, pressure_bcs, gamma, &
-         internal_energy_floor, dt, time, this%stage_diagnostics(3), 3, &
+         internal_energy_floor, dt, stage_time, &
+         this%stage_diagnostics(3), 3, &
          entropy_viscosity_fraction, graph_wave_speed)
 
     ! U(n+1) = 1/3 U(n) + 2/3 FE(U(2)).
@@ -1351,7 +1372,7 @@ contains
     call this%apply_boundary_conditions(rho, m_x, m_y, m_z, energy, &
          density_bcs, velocity_bcs, pressure_bcs, gamma, &
          internal_energy_floor, time, &
-         'SSPRK3 final state after boundary conditions')
+         'SSPRK3 final state after boundary conditions', refresh = .true.)
     diagnostics = this%stage_diagnostics(3)
   end subroutine euler_idp_cpu_advance
 
@@ -1506,16 +1527,36 @@ contains
   !> Apply the compressible strong boundary conditions to a conserved state.
   subroutine euler_idp_cpu_apply_boundary_conditions(this, rho, m_x, m_y, &
        m_z, energy, density_bcs, velocity_bcs, pressure_bcs, gamma, &
-       internal_energy_floor, time, label)
+       internal_energy_floor, time, label, refresh)
     class(euler_idp_cpu_t), intent(inout) :: this
     type(field_t), intent(inout) :: rho, m_x, m_y, m_z, energy
     type(bc_list_t), intent(inout) :: density_bcs, velocity_bcs, pressure_bcs
     real(kind=rp), intent(in) :: gamma, internal_energy_floor
     type(time_state_t), intent(in), optional :: time
     character(len=*), intent(in) :: label
-    integer :: n
+    logical, intent(in), optional :: refresh
+    class(bc_t), pointer :: boundary
+    integer :: i, n
+    logical :: refresh_
 
     call profiler_start_region('Euler IDP boundary')
+    refresh_ = .false.
+    if (present(refresh)) refresh_ = refresh
+    if (refresh_) then
+       do i = 1, density_bcs%size()
+          boundary => density_bcs%get(i)
+          boundary%updated = .false.
+       end do
+       do i = 1, velocity_bcs%size()
+          boundary => velocity_bcs%get(i)
+          boundary%updated = .false.
+       end do
+       do i = 1, pressure_bcs%size()
+          boundary => pressure_bcs%get(i)
+          boundary%updated = .false.
+       end do
+       nullify(boundary)
+    end if
     n = rho%size()
     if (present(time)) then
        call density_bcs%apply(rho, time = time, strong = .true.)

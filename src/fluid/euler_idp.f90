@@ -40,6 +40,7 @@ module euler_idp
   private
 
   integer, public, parameter :: EULER_IDP_NCOMP = 5
+  public :: euler_idp_stage_time
 
   !> State and graph data immediately around a strong boundary map.
   type, public :: euler_idp_state_observation_t
@@ -126,6 +127,26 @@ module euler_idp
   end type euler_idp_diagnostics_t
 
 contains
+
+  !> Return the physical time of a Forward Euler evaluation in the selected
+  !! time integrator. The incoming time is Neko's end-of-step time.
+  pure real(kind=rp) function euler_idp_stage_time(time, dt, order, stage) &
+       result(value)
+    real(kind=rp), intent(in) :: time, dt
+    integer, intent(in) :: order, stage
+
+    value = time - dt
+    if (order .eq. 3) then
+       select case (stage)
+       case (1)
+          value = time - dt
+       case (2)
+          value = time
+       case (3)
+          value = time - 0.5_rp * dt
+       end select
+    end if
+  end function euler_idp_stage_time
 
   !> Read the Euler IDP configuration from a case file.
   subroutine euler_idp_config_init(this, params)
