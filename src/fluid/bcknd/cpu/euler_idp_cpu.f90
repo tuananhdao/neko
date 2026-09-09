@@ -103,8 +103,6 @@ module euler_idp_cpu
      real(kind=rp), allocatable :: low_element_residual_sum(:,:)
      real(kind=rp), allocatable :: low_element_boundary_flux(:,:)
      real(kind=rp), allocatable :: edge_viscosity(:)
-     real(kind=rp), allocatable :: edge_wave_speed(:)
-     real(kind=rp), allocatable :: bar_state(:,:)
      real(kind=rp), allocatable :: correction_flux(:,:)
      integer, allocatable :: state_status(:)
      real(kind=rp) :: domain_volume = 0.0_rp
@@ -274,8 +272,6 @@ contains
        this%low_element_boundary_flux = 0.0_rp
     end if
     if (allocated(this%edge_viscosity)) deallocate(this%edge_viscosity)
-    if (allocated(this%edge_wave_speed)) deallocate(this%edge_wave_speed)
-    if (allocated(this%bar_state)) deallocate(this%bar_state)
     if (allocated(this%correction_flux)) deallocate(this%correction_flux)
     call this%graph%init(coef, gs)
     this%domain_volume = coef%volume
@@ -297,12 +293,8 @@ contains
     this%density_relaxation_mass = global_mass
     this%periodic_graph = this%graph%periodic_facets_covered(coef)
     allocate(this%edge_viscosity(this%graph%n_edges))
-    allocate(this%edge_wave_speed(this%graph%n_edges))
-    allocate(this%bar_state(EULER_IDP_NCOMP, this%graph%n_edges))
     allocate(this%correction_flux(EULER_IDP_NCOMP, this%graph%n_edges))
     this%edge_viscosity = 0.0_rp
-    this%edge_wave_speed = 0.0_rp
-    this%bar_state = 0.0_rp
     this%correction_flux = 0.0_rp
 
     local_error = 0.0_rp
@@ -391,8 +383,6 @@ contains
        deallocate(this%low_element_boundary_flux)
     end if
     if (allocated(this%edge_viscosity)) deallocate(this%edge_viscosity)
-    if (allocated(this%edge_wave_speed)) deallocate(this%edge_wave_speed)
-    if (allocated(this%bar_state)) deallocate(this%bar_state)
     if (allocated(this%correction_flux)) deallocate(this%correction_flux)
     if (allocated(this%state_status)) deallocate(this%state_status)
     this%initialized = .false.
@@ -412,7 +402,7 @@ contains
     this%limiter_weight_error = 0.0_rp
   end subroutine euler_idp_cpu_free
 
-  !> Update symmetric graph viscosity, bar states, and the graph CFL rate.
+  !> Update symmetric graph viscosity and the graph CFL rate.
   subroutine euler_idp_cpu_update_graph_viscosity(this, rho, m_x, m_y, m_z, &
        energy, gs, gamma, graph_wave_speed)
     class(euler_idp_cpu_t), intent(inout) :: this
@@ -424,10 +414,11 @@ contains
     real(kind=rp) :: right_state(EULER_IDP_NCOMP)
     real(kind=rp) :: left_flux(EULER_IDP_NCOMP)
     real(kind=rp) :: right_flux(EULER_IDP_NCOMP)
+    real(kind=rp) :: bar_state(EULER_IDP_NCOMP)
     real(kind=rp) :: normal(3), coefficient_norm, flux_scale
     real(kind=rp) :: local_rate, global_rate
     real(kind=rp) :: local_wave_speed, global_wave_speed
-    real(kind=rp) :: left_wave_speed, right_wave_speed
+    real(kind=rp) :: left_wave_speed, right_wave_speed, edge_wave_speed
     integer :: edge, ierr
 
     if (.not. this%graph%initialized) then
@@ -436,6 +427,7 @@ contains
 
     call profiler_start_region('Euler IDP graph viscosity')
     this%viscosity_sum%x = 0.0_rp
+    local_wave_speed = 0.0_rp
     do edge = 1, this%graph%n_edges
        associate(a => this%graph%left(:,edge), &
             b => this%graph%right(:,edge), &
@@ -462,14 +454,14 @@ contains
                call neko_error('User graph wave speed must be finite and ' // &
                     'nonnegative')
             end if
-            this%edge_wave_speed(edge) = max(left_wave_speed, &
-                 right_wave_speed)
+            edge_wave_speed = max(left_wave_speed, right_wave_speed)
          else
-            this%edge_wave_speed(edge) = euler_idp_maximum_wave_speed( &
+            edge_wave_speed = euler_idp_maximum_wave_speed( &
                  left_state, right_state, normal, gamma)
          end if
          this%edge_viscosity(edge) = coefficient_norm * &
-              this%edge_wave_speed(edge)
+              edge_wave_speed
+         local_wave_speed = max(local_wave_speed, edge_wave_speed)
          call euler_idp_flux_dot_vector(left_state, coefficient, gamma, &
               left_flux)
          call euler_idp_flux_dot_vector(right_state, coefficient, gamma, &
@@ -485,14 +477,13 @@ contains
          end if
          call euler_idp_bar_state(left_state, right_state, &
               right_flux - left_flux, this%edge_viscosity(edge), &
-              this%bar_state(:,edge))
-         if (this%bar_state(1,edge) .le. 0.0_rp) then
+              bar_state)
+         if (bar_state(1) .le. 0.0_rp) then
             call neko_error('Euler IDP graph viscosity produced a bar ' // &
                  'state with nonpositive density')
          end if
          if ((this%limit_internal_energy .or. this%limit_entropy) .and. &
-              euler_idp_internal_energy(this%bar_state(:,edge)) .le. &
-              0.0_rp) then
+              euler_idp_internal_energy(bar_state) .le. 0.0_rp) then
             call neko_error('Euler IDP graph viscosity produced a bar ' // &
                  'state with nonpositive internal energy')
          end if
@@ -509,13 +500,9 @@ contains
     call profiler_end_region('Euler IDP gather-scatter')
 
     local_rate = 0.0_rp
-    local_wave_speed = 0.0_rp
     if (rho%size() .gt. 0) then
        local_rate = maxval(2.0_rp * this%viscosity_sum%x / &
             this%graph%mass%x)
-    end if
-    if (this%graph%n_edges .gt. 0) then
-       local_wave_speed = maxval(this%edge_wave_speed)
     end if
     call profiler_start_region('Euler IDP MPI reduction')
     call MPI_Allreduce(local_rate, global_rate, 1, MPI_REAL_PRECISION, &
@@ -563,6 +550,7 @@ contains
     type(euler_idp_diagnostics_t), intent(inout) :: diagnostics
     real(kind=rp), intent(out) :: directional_error(EULER_IDP_NCOMP)
     real(kind=rp) :: difference, left_value, right_value
+    real(kind=rp) :: left_flux_value, right_flux_value, flux_difference
     integer :: component, edge
 
     call profiler_start_region('Euler IDP low-order graph')
@@ -593,12 +581,22 @@ contains
        end if
        do edge = 1, this%graph%n_edges
           associate(a => this%graph%left(:,edge), &
-               b => this%graph%right(:,edge))
+               b => this%graph%right(:,edge), &
+               coefficient => this%graph%coefficient(:,edge))
             left_value = euler_idp_cpu_state_component(component, a, rho, &
                  m_x, m_y, m_z, energy)
             right_value = euler_idp_cpu_state_component(component, b, rho, &
                  m_x, m_y, m_z, energy)
             difference = right_value - left_value
+            left_flux_value = coefficient(1) * &
+                 this%flux_x%x(a(1),a(2),a(3),a(4)) + coefficient(2) * &
+                 this%flux_y%x(a(1),a(2),a(3),a(4)) + coefficient(3) * &
+                 this%flux_z%x(a(1),a(2),a(3),a(4))
+            right_flux_value = coefficient(1) * &
+                 this%flux_x%x(b(1),b(2),b(3),b(4)) + coefficient(2) * &
+                 this%flux_y%x(b(1),b(2),b(3),b(4)) + coefficient(3) * &
+                 this%flux_z%x(b(1),b(2),b(3),b(4))
+            flux_difference = right_flux_value - left_flux_value
             this%low_local_residual(component)%x( &
                  a(1),a(2),a(3),a(4)) = &
                  this%low_local_residual(component)%x( &
@@ -614,14 +612,12 @@ contains
                     a(1),a(2),a(3),a(4)) = &
                     this%low_assembled_residual(component)%x( &
                     a(1),a(2),a(3),a(4)) + &
-                    2.0_rp * this%edge_viscosity(edge) * &
-                    (left_value - this%bar_state(component,edge))
+                    flux_difference - this%edge_viscosity(edge) * difference
                this%low_assembled_residual(component)%x( &
                     b(1),b(2),b(3),b(4)) = &
                     this%low_assembled_residual(component)%x( &
                     b(1),b(2),b(3),b(4)) + &
-                    2.0_rp * this%edge_viscosity(edge) * &
-                    (right_value - this%bar_state(component,edge))
+                    flux_difference + this%edge_viscosity(edge) * difference
             end if
           end associate
        end do
@@ -668,6 +664,7 @@ contains
     real(kind=rp), intent(in) :: gamma
     type(euler_idp_diagnostics_t), intent(inout) :: diagnostics
     real(kind=rp) :: left_density, right_density, bar_density
+    real(kind=rp) :: left_mass_flux, right_mass_flux
     real(kind=rp) :: entropy
     real(kind=rp) :: difference, pair_average
     real(kind=rp) :: left_weight, right_weight
@@ -701,10 +698,21 @@ contains
     end if
     do edge = 1, this%graph%n_edges
        associate(a => this%graph%left(:,edge), &
-            b => this%graph%right(:,edge))
+            b => this%graph%right(:,edge), &
+            coefficient => this%graph%coefficient(:,edge))
          left_density = rho%x(a(1),a(2),a(3),a(4))
          right_density = rho%x(b(1),b(2),b(3),b(4))
-         bar_density = this%bar_state(1,edge)
+         left_mass_flux = coefficient(1) * m_x%x(a(1),a(2),a(3),a(4)) + &
+              coefficient(2) * m_y%x(a(1),a(2),a(3),a(4)) + &
+              coefficient(3) * m_z%x(a(1),a(2),a(3),a(4))
+         right_mass_flux = coefficient(1) * m_x%x(b(1),b(2),b(3),b(4)) + &
+              coefficient(2) * m_y%x(b(1),b(2),b(3),b(4)) + &
+              coefficient(3) * m_z%x(b(1),b(2),b(3),b(4))
+         bar_density = 0.5_rp * (left_density + right_density)
+         if (this%edge_viscosity(edge) .gt. tiny(1.0_rp)) then
+            bar_density = bar_density - (right_mass_flux - left_mass_flux) / &
+                 (2.0_rp * this%edge_viscosity(edge))
+         end if
          this%density_lower_bound%x(a(1),a(2),a(3),a(4)) = min( &
               this%density_lower_bound%x(a(1),a(2),a(3),a(4)), &
               right_density, bar_density)
