@@ -47,7 +47,8 @@ module euler_idp_cpu
        compressible_ops_cpu_update_uvw, &
        compressible_ops_cpu_update_mxyz_p_ruvw, &
        compressible_ops_cpu_update_e, EULER_STATE_OK
-  use euler_idp, only : EULER_IDP_NCOMP, euler_idp_diagnostics_t
+  use euler_idp, only : EULER_IDP_NCOMP, euler_idp_diagnostics_t, &
+       euler_idp_state_observation_t
   use euler_idp_low_order, only : euler_idp_maximum_wave_speed, &
        euler_idp_flux_dot_vector, euler_idp_bar_state, &
        euler_idp_internal_energy, euler_idp_internal_energy_timestep
@@ -113,6 +114,7 @@ module euler_idp_cpu
      real(kind=rp), allocatable :: edge_limiter(:)
      integer, allocatable :: state_status(:)
      real(kind=rp) :: max_graph_rate = 0.0_rp
+     real(kind=rp) :: max_graph_wave_speed = 0.0_rp
      real(kind=rp) :: domain_volume = 0.0_rp
      real(kind=rp) :: density_relaxation_mass = 0.0_rp
      real(kind=rp) :: maximum_graph_timestep = huge(1.0_rp)
@@ -202,6 +204,7 @@ contains
     this%low_element_boundary_flux = 0.0_rp
     this%state_status = EULER_STATE_OK
     this%max_graph_rate = 0.0_rp
+    this%max_graph_wave_speed = 0.0_rp
     this%domain_volume = 0.0_rp
     this%maximum_graph_timestep = huge(1.0_rp)
     this%maximum_floor_timestep = huge(1.0_rp)
@@ -424,6 +427,7 @@ contains
     this%density_bound_relaxation_factor = 1.0_rp
     this%correction_tolerance = 1.0e-10_rp
     this%max_graph_rate = 0.0_rp
+    this%max_graph_wave_speed = 0.0_rp
     this%domain_volume = 0.0_rp
     this%density_relaxation_mass = 0.0_rp
     this%maximum_graph_timestep = huge(1.0_rp)
@@ -504,6 +508,7 @@ contains
     real(kind=rp) :: right_flux(EULER_IDP_NCOMP)
     real(kind=rp) :: normal(3), coefficient_norm, flux_scale
     real(kind=rp) :: local_rate, global_rate
+    real(kind=rp) :: local_wave_speed, global_wave_speed
     real(kind=rp) :: left_wave_speed, right_wave_speed
     integer :: edge, ierr
 
@@ -581,16 +586,27 @@ contains
               this%edge_viscosity(edge)
        end associate
     end do
+    call profiler_start_region('Euler IDP gather-scatter')
     call gs%op(this%viscosity_sum, GS_OP_ADD)
+    call profiler_end_region('Euler IDP gather-scatter')
 
     local_rate = 0.0_rp
+    local_wave_speed = 0.0_rp
     if (rho%size() .gt. 0) then
        local_rate = maxval(2.0_rp * this%viscosity_sum%x / &
             this%graph%mass%x)
     end if
+    if (this%graph%n_edges .gt. 0) then
+       local_wave_speed = maxval(this%edge_wave_speed)
+    end if
+    call profiler_start_region('Euler IDP MPI reduction')
     call MPI_Allreduce(local_rate, global_rate, 1, MPI_REAL_PRECISION, &
          MPI_MAX, NEKO_COMM, ierr)
+    call MPI_Allreduce(local_wave_speed, global_wave_speed, 1, &
+         MPI_REAL_PRECISION, MPI_MAX, NEKO_COMM, ierr)
+    call profiler_end_region('Euler IDP MPI reduction')
     this%max_graph_rate = global_rate
+    this%max_graph_wave_speed = global_wave_speed
     if (global_rate .gt. 0.0_rp) then
        this%maximum_graph_timestep = 1.0_rp / global_rate
     else
@@ -680,7 +696,9 @@ contains
           this%low_assembled_residual(component)%x = &
                this%low_local_residual(component)%x
        end if
+       call profiler_start_region('Euler IDP gather-scatter')
        call gs%op(this%low_assembled_residual(component), GS_OP_ADD)
+       call profiler_end_region('Euler IDP gather-scatter')
        this%low_assembled_residual(component)%x = &
             this%low_assembled_residual(component)%x * coef%Binv
     end do
@@ -772,12 +790,14 @@ contains
          end if
        end associate
     end do
+    call profiler_start_region('Euler IDP gather-scatter')
     call gs%op(this%density_lower_bound, GS_OP_MIN)
     call gs%op(this%density_upper_bound, GS_OP_MAX)
     call gs%op(this%entropy_lower_bound, GS_OP_MIN)
     if (this%relax_density_bounds) then
        call gs%op(this%density_second_difference, GS_OP_ADD)
     end if
+    call profiler_end_region('Euler IDP gather-scatter')
 
     local_violation = 0.0_rp
     if (rho%size() .gt. 0) then
@@ -843,7 +863,9 @@ contains
                  b(1),b(2),b(3),b(4)) + right_weight * pair_average
           end associate
        end do
+       call profiler_start_region('Euler IDP gather-scatter')
        call gs%op(this%density_second_difference_average, GS_OP_ADD)
+       call profiler_end_region('Euler IDP gather-scatter')
        this%density_second_difference_average%x = &
             this%density_second_difference_average%x / &
             (2.0_rp * real(2 * this%graph%n_directions + 1, rp))
@@ -890,12 +912,15 @@ contains
     real(kind=rp) :: high_order_fraction
     real(kind=rp) :: state_difference(EULER_IDP_NCOMP)
     real(kind=rp) :: directional_error_local(EULER_IDP_NCOMP)
+    real(kind=rp) :: local_wave_speed, global_wave_speed
     character(len=2 * LOG_SIZE) :: message
     integer :: component, edge, i, ierr
     logical :: scalar_density_mode
 
+    call profiler_start_region('Euler IDP Forward Euler')
     call diagnostics%reset()
     if (present(stage)) diagnostics%stage = stage
+    diagnostics%stage_time = time%t
     scalar_density_mode = present(graph_wave_speed) .and. &
          .not. this%limit_internal_energy .and. .not. this%limit_entropy
     call this%evaluate_high_order(rho, m_x, m_y, m_z, energy, coef, gs, &
@@ -904,6 +929,19 @@ contains
     call this%evaluate_low_order(rho, m_x, m_y, m_z, energy, coef, gs, &
          gamma, internal_energy_floor, diagnostics, &
          present(entropy_viscosity_fraction), graph_wave_speed)
+
+    local_wave_speed = 0.0_rp
+    if (rho%size() .gt. 0) then
+       local_wave_speed = maxval(sqrt(this%u%x**2 + this%v%x**2 + &
+            this%w%x**2) + this%sound_speed%x)
+    end if
+    call profiler_start_region('Euler IDP MPI reduction')
+    call MPI_Allreduce(local_wave_speed, global_wave_speed, 1, &
+         MPI_REAL_PRECISION, MPI_MAX, NEKO_COMM, ierr)
+    call profiler_end_region('Euler IDP MPI reduction')
+    diagnostics%max_nodal_wave_speed = global_wave_speed
+    diagnostics%max_graph_wave_speed = this%max_graph_wave_speed
+    diagnostics%max_graph_rate = this%max_graph_rate
 
     call profiler_start_region('Euler IDP timestep limits')
     diagnostics%max_graph_cfl = this%graph_cfl(dt)
@@ -937,8 +975,10 @@ contains
                euler_idp_internal_energy_timestep(state, residual, &
                internal_energy_floor, this%maximum_graph_timestep))
        end do
+       call profiler_start_region('Euler IDP MPI reduction')
        call MPI_Allreduce(local_floor_timestep, global_floor_timestep, 1, &
             MPI_REAL_PRECISION, MPI_MIN, NEKO_COMM, ierr)
+       call profiler_end_region('Euler IDP MPI reduction')
     else
        global_floor_timestep = this%maximum_graph_timestep
     end if
@@ -961,6 +1001,7 @@ contains
     end if
     call profiler_end_region('Euler IDP timestep limits')
 
+    call profiler_start_region('Euler IDP low update')
     this%low_candidate(1)%x = rho%x - dt * &
          this%low_assembled_residual(1)%x
     this%low_candidate(2)%x = m_x%x - dt * &
@@ -980,6 +1021,7 @@ contains
        this%low_candidate(4)%x = m_z%x
        this%low_candidate(5)%x = energy%x
     end if
+    call profiler_end_region('Euler IDP low update')
 
     call this%compute_bounds(rho, m_x, m_y, m_z, energy, gs, gamma, &
          diagnostics)
@@ -1077,7 +1119,9 @@ contains
     do component = 1, EULER_IDP_NCOMP
        call this%graph%incidence(this%flux_x%x, &
             this%correction_flux(component,:))
+       call profiler_start_region('Euler IDP gather-scatter')
        call gs%op(this%flux_x, GS_OP_ADD)
+       call profiler_end_region('Euler IDP gather-scatter')
        this%candidate(component)%x = this%low_candidate(component)%x + &
             this%flux_x%x / this%graph%mass%x
        local_change(component) = 0.0_rp
@@ -1127,11 +1171,21 @@ contains
     diagnostics%limiter_weight_error = this%limiter_weight_error
     call this%compute_limiter(gamma, internal_energy_floor, diagnostics)
     call this%apply_correction(gs)
+    call euler_idp_cpu_observe_state(this, this%limited_candidate(1), &
+         this%limited_candidate(2), this%limited_candidate(3), &
+         this%limited_candidate(4), this%limited_candidate(5), gs, gamma, &
+         internal_energy_floor, time, 'candidate before boundary conditions', &
+         diagnostics%before_boundary, graph_wave_speed)
     call this%apply_boundary_conditions(this%limited_candidate(1), &
          this%limited_candidate(2), this%limited_candidate(3), &
          this%limited_candidate(4), this%limited_candidate(5), density_bcs, &
          velocity_bcs, pressure_bcs, gamma, internal_energy_floor, time, &
          'limited candidate after boundary conditions')
+    call euler_idp_cpu_observe_state(this, this%limited_candidate(1), &
+         this%limited_candidate(2), this%limited_candidate(3), &
+         this%limited_candidate(4), this%limited_candidate(5), gs, gamma, &
+         internal_energy_floor, time, 'candidate after boundary conditions', &
+         diagnostics%after_boundary, graph_wave_speed)
 
     call profiler_start_region('Euler IDP diagnostics')
     local_bound_violation = 0.0_rp
@@ -1193,13 +1247,16 @@ contains
                euler_idp_specific_entropy(state, gamma))
        end do
     end if
+    call profiler_start_region('Euler IDP MPI reduction')
     call MPI_Allreduce(local_minimum, global_minimum, 4, &
          MPI_REAL_PRECISION, MPI_MIN, NEKO_COMM, ierr)
+    call profiler_end_region('Euler IDP MPI reduction')
     diagnostics%min_density = global_minimum(1)
     diagnostics%min_internal_energy = global_minimum(2)
     diagnostics%min_pressure = global_minimum(3)
     diagnostics%min_specific_entropy = global_minimum(4)
     call profiler_end_region('Euler IDP diagnostics')
+    call profiler_end_region('Euler IDP Forward Euler')
   end subroutine euler_idp_cpu_forward_euler
 
   !> Advance with Forward Euler or SSPRK3 using the limited Euler map.
@@ -1257,6 +1314,7 @@ contains
          entropy_viscosity_fraction, graph_wave_speed)
 
     ! U(2) = 3/4 U(n) + 1/4 FE(U(1)).
+    call profiler_start_region('Euler IDP SSP combination')
     rho%x = 0.75_rp * this%saved_state(1)%x + &
          0.25_rp * this%limited_candidate(1)%x
     m_x%x = 0.75_rp * this%saved_state(2)%x + &
@@ -1267,6 +1325,7 @@ contains
          0.25_rp * this%limited_candidate(4)%x
     energy%x = 0.75_rp * this%saved_state(5)%x + &
          0.25_rp * this%limited_candidate(5)%x
+    call profiler_end_region('Euler IDP SSP combination')
     call this%apply_boundary_conditions(rho, m_x, m_y, m_z, energy, &
          density_bcs, velocity_bcs, pressure_bcs, gamma, &
          internal_energy_floor, time, &
@@ -1277,6 +1336,7 @@ contains
          entropy_viscosity_fraction, graph_wave_speed)
 
     ! U(n+1) = 1/3 U(n) + 2/3 FE(U(2)).
+    call profiler_start_region('Euler IDP SSP combination')
     rho%x = this%saved_state(1)%x / 3.0_rp + &
          2.0_rp * this%limited_candidate(1)%x / 3.0_rp
     m_x%x = this%saved_state(2)%x / 3.0_rp + &
@@ -1287,6 +1347,7 @@ contains
          2.0_rp * this%limited_candidate(4)%x / 3.0_rp
     energy%x = this%saved_state(5)%x / 3.0_rp + &
          2.0_rp * this%limited_candidate(5)%x / 3.0_rp
+    call profiler_end_region('Euler IDP SSP combination')
     call this%apply_boundary_conditions(rho, m_x, m_y, m_z, energy, &
          density_bcs, velocity_bcs, pressure_bcs, gamma, &
          internal_energy_floor, time, &
@@ -1362,10 +1423,12 @@ contains
        if (entropy_limited) local_count(5) = local_count(5) + 1
     end do
 
+    call profiler_start_region('Euler IDP MPI reduction')
     call MPI_Allreduce(local_minimum, global_minimum, 1, &
          MPI_REAL_PRECISION, MPI_MIN, NEKO_COMM, ierr)
     call MPI_Allreduce(local_count, global_count, 5, MPI_INTEGER, MPI_SUM, &
          NEKO_COMM, ierr)
+    call profiler_end_region('Euler IDP MPI reduction')
 
     diagnostics%min_limiter = global_minimum
     if (global_count(1) .gt. 0) then
@@ -1388,7 +1451,7 @@ contains
     real(kind=rp) :: degree, weight, auxiliary
     integer :: component, direction, edge
 
-    call profiler_start_region('Euler IDP correction')
+    call profiler_start_region('Euler IDP correction asm')
     do component = 1, EULER_IDP_NCOMP
        this%limited_candidate(component)%x = 0.0_rp
        do edge = 1, this%graph%n_edges
@@ -1421,9 +1484,11 @@ contains
                  weight * auxiliary
           end associate
        end do
+       call profiler_start_region('Euler IDP gather-scatter')
        call gs%op(this%limited_candidate(component), GS_OP_ADD)
+       call profiler_end_region('Euler IDP gather-scatter')
     end do
-    call profiler_end_region('Euler IDP correction')
+    call profiler_end_region('Euler IDP correction asm')
   end subroutine euler_idp_cpu_apply_correction
 
   !> Commit the checked limited Forward Euler candidate.
@@ -1483,6 +1548,104 @@ contains
          internal_energy_floor, label)
     call profiler_end_region('Euler IDP boundary')
   end subroutine euler_idp_cpu_apply_boundary_conditions
+
+  !> Record admissibility and wave-speed data for one conserved state.
+  subroutine euler_idp_cpu_observe_state(this, rho, m_x, m_y, m_z, energy, &
+       gs, gamma, internal_energy_floor, time, label, observation, &
+       graph_wave_speed)
+    class(euler_idp_cpu_t), intent(inout) :: this
+    type(field_t), intent(in) :: rho, m_x, m_y, m_z, energy
+    type(gs_t), intent(inout) :: gs
+    real(kind=rp), intent(in) :: gamma, internal_energy_floor
+    type(time_state_t), intent(in) :: time
+    character(len=*), intent(in) :: label
+    type(euler_idp_state_observation_t), intent(out) :: observation
+    type(field_t), intent(in), optional :: graph_wave_speed
+    real(kind=rp) :: left_state(EULER_IDP_NCOMP)
+    real(kind=rp) :: right_state(EULER_IDP_NCOMP)
+    real(kind=rp) :: normal(3), coefficient_norm, wave_speed
+    real(kind=rp) :: local_minimum(3), global_minimum(3)
+    real(kind=rp) :: local_maximum(3), global_maximum(3)
+    integer :: edge, ierr
+
+    call profiler_start_region('Euler IDP state audit')
+    call euler_idp_cpu_primitives(this, rho, m_x, m_y, m_z, energy, gamma, &
+         internal_energy_floor, label)
+
+    this%viscosity_sum%x = 0.0_rp
+    local_maximum = 0.0_rp
+    if (rho%size() .gt. 0) then
+       local_minimum = [minval(this%rho%x), &
+            minval(this%internal_energy%x), minval(this%p%x)]
+       local_maximum(1) = maxval(sqrt(this%u%x**2 + this%v%x**2 + &
+            this%w%x**2) + this%sound_speed%x)
+    else
+       local_minimum = huge(1.0_rp)
+    end if
+
+    do edge = 1, this%graph%n_edges
+       associate(a => this%graph%left(:,edge), &
+            b => this%graph%right(:,edge), &
+            coefficient => this%graph%coefficient(:,edge))
+         coefficient_norm = sqrt(dot_product(coefficient, coefficient))
+         if (coefficient_norm .le. tiny(1.0_rp)) cycle
+         if (present(graph_wave_speed)) then
+            wave_speed = max(graph_wave_speed%x(a(1),a(2),a(3),a(4)), &
+                 graph_wave_speed%x(b(1),b(2),b(3),b(4)))
+            if (.not. ieee_is_finite(wave_speed) .or. &
+                 wave_speed .lt. 0.0_rp) then
+               call neko_error('User graph wave speed must be finite and ' // &
+                    'nonnegative')
+            end if
+         else
+            normal = coefficient / coefficient_norm
+            left_state = [rho%x(a(1),a(2),a(3),a(4)), &
+                 m_x%x(a(1),a(2),a(3),a(4)), &
+                 m_y%x(a(1),a(2),a(3),a(4)), &
+                 m_z%x(a(1),a(2),a(3),a(4)), &
+                 energy%x(a(1),a(2),a(3),a(4))]
+            right_state = [rho%x(b(1),b(2),b(3),b(4)), &
+                 m_x%x(b(1),b(2),b(3),b(4)), &
+                 m_y%x(b(1),b(2),b(3),b(4)), &
+                 m_z%x(b(1),b(2),b(3),b(4)), &
+                 energy%x(b(1),b(2),b(3),b(4))]
+            wave_speed = euler_idp_maximum_wave_speed(left_state, &
+                 right_state, normal, gamma)
+         end if
+         local_maximum(2) = max(local_maximum(2), wave_speed)
+         this%viscosity_sum%x(a(1),a(2),a(3),a(4)) = &
+              this%viscosity_sum%x(a(1),a(2),a(3),a(4)) + &
+              coefficient_norm * wave_speed
+         this%viscosity_sum%x(b(1),b(2),b(3),b(4)) = &
+              this%viscosity_sum%x(b(1),b(2),b(3),b(4)) + &
+              coefficient_norm * wave_speed
+       end associate
+    end do
+
+    call profiler_start_region('Euler IDP gather-scatter')
+    call gs%op(this%viscosity_sum, GS_OP_ADD)
+    call profiler_end_region('Euler IDP gather-scatter')
+    if (rho%size() .gt. 0) then
+       local_maximum(3) = maxval(2.0_rp * this%viscosity_sum%x / &
+            this%graph%mass%x)
+    end if
+
+    call profiler_start_region('Euler IDP MPI reduction')
+    call MPI_Allreduce(local_minimum, global_minimum, 3, &
+         MPI_REAL_PRECISION, MPI_MIN, NEKO_COMM, ierr)
+    call MPI_Allreduce(local_maximum, global_maximum, 3, &
+         MPI_REAL_PRECISION, MPI_MAX, NEKO_COMM, ierr)
+    call profiler_end_region('Euler IDP MPI reduction')
+
+    observation%time = time%t
+    observation%min_density = global_minimum(1)
+    observation%min_internal_energy = global_minimum(2)
+    observation%min_pressure = global_minimum(3)
+    observation%max_nodal_wave_speed = global_maximum(1)
+    observation%max_graph_wave_speed = global_maximum(2)
+    observation%max_graph_rate = global_maximum(3)
+    call profiler_end_region('Euler IDP state audit')
+  end subroutine euler_idp_cpu_observe_state
 
   !> Reconstruct primitive fields from one conserved state.
   subroutine euler_idp_cpu_primitives(this, rho, m_x, m_y, m_z, energy, &

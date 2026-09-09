@@ -41,6 +41,17 @@ module euler_idp
 
   integer, public, parameter :: EULER_IDP_NCOMP = 5
 
+  !> State and graph data immediately around a strong boundary map.
+  type, public :: euler_idp_state_observation_t
+     real(kind=rp) :: time = 0.0_rp
+     real(kind=rp) :: min_density = huge(1.0_rp)
+     real(kind=rp) :: min_internal_energy = huge(1.0_rp)
+     real(kind=rp) :: min_pressure = huge(1.0_rp)
+     real(kind=rp) :: max_nodal_wave_speed = 0.0_rp
+     real(kind=rp) :: max_graph_wave_speed = 0.0_rp
+     real(kind=rp) :: max_graph_rate = 0.0_rp
+  end type euler_idp_state_observation_t
+
   !> Configuration of the opt-in Euler IDP path.
   type, public :: euler_idp_config_t
      logical :: enabled = .false.
@@ -58,11 +69,15 @@ module euler_idp
   !> Diagnostics shared by the Euler IDP implementation modules.
   type, public :: euler_idp_diagnostics_t
      integer :: stage = 0
+     real(kind=rp) :: stage_time = 0.0_rp
      real(kind=rp) :: min_density = huge(1.0_rp)
      real(kind=rp) :: min_internal_energy = huge(1.0_rp)
      real(kind=rp) :: min_pressure = huge(1.0_rp)
      real(kind=rp) :: min_specific_entropy = huge(1.0_rp)
      real(kind=rp) :: max_graph_cfl = 0.0_rp
+     real(kind=rp) :: max_nodal_wave_speed = 0.0_rp
+     real(kind=rp) :: max_graph_wave_speed = 0.0_rp
+     real(kind=rp) :: max_graph_rate = 0.0_rp
      real(kind=rp) :: min_convex_weight = 1.0_rp
      real(kind=rp) :: maximum_floor_timestep = huge(1.0_rp)
      logical :: entropy_viscosity_enabled = .false.
@@ -104,6 +119,8 @@ module euler_idp
      integer :: density_limited_edges = 0
      integer :: internal_energy_limited_edges = 0
      integer :: entropy_limited_edges = 0
+     type(euler_idp_state_observation_t) :: before_boundary
+     type(euler_idp_state_observation_t) :: after_boundary
    contains
      procedure, pass(this) :: reset => euler_idp_diagnostics_reset
   end type euler_idp_diagnostics_t
@@ -168,11 +185,15 @@ contains
     class(euler_idp_diagnostics_t), intent(inout) :: this
 
     this%stage = 0
+    this%stage_time = 0.0_rp
     this%min_density = huge(1.0_rp)
     this%min_internal_energy = huge(1.0_rp)
     this%min_pressure = huge(1.0_rp)
     this%min_specific_entropy = huge(1.0_rp)
     this%max_graph_cfl = 0.0_rp
+    this%max_nodal_wave_speed = 0.0_rp
+    this%max_graph_wave_speed = 0.0_rp
+    this%max_graph_rate = 0.0_rp
     this%min_convex_weight = 1.0_rp
     this%maximum_floor_timestep = huge(1.0_rp)
     this%entropy_viscosity_enabled = .false.
@@ -210,6 +231,8 @@ contains
     this%density_limited_edges = 0
     this%internal_energy_limited_edges = 0
     this%entropy_limited_edges = 0
+    this%before_boundary = euler_idp_state_observation_t()
+    this%after_boundary = euler_idp_state_observation_t()
   end subroutine euler_idp_diagnostics_reset
 
 end module euler_idp
