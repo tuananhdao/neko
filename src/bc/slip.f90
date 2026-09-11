@@ -40,7 +40,8 @@ module slip
   use json_module, only : json_file
   use time_state, only : time_state_t
   use utils, only : neko_error
-  use device, only : device_memcpy, HOST_TO_DEVICE
+  use device, only : device_memcpy, HOST_TO_DEVICE, DEVICE_TO_HOST
+  use gather_scatter, only : GS_OP_ADD
   use device_math, only : device_col3, device_addcol3, device_subcol3, &
        device_masked_gather_copy_0, device_masked_scatter_copy_0
   use, intrinsic :: iso_c_binding, only : c_ptr
@@ -108,13 +109,51 @@ contains
   !> Normalize the area-weighted nodal normals constructed by facet_normal_t.
   subroutine slip_normalize_normals(this)
     class(slip_t), target, intent(inout) :: this
-    integer :: i, m
+    type(vector_t) :: gathered_x, gathered_y, gathered_z
+    integer :: i, k, m, n
     real(kind=rp) :: normal_magnitude
 
     if (.not. allocated(this%unique_mask)) return
 
     m = this%unique_mask(0)
+    n = this%coef%dof%size()
+    call gathered_x%init(n)
+    call gathered_y%init(n)
+    call gathered_z%init(n)
+
     do i = 1, m
+       k = this%unique_mask(i)
+       gathered_x%x(k) = this%nx%x(i)
+       gathered_y%x(k) = this%ny%x(i)
+       gathered_z%x(k) = this%nz%x(i)
+    end do
+
+    if (NEKO_BCKND_DEVICE .eq. 1) then
+       call device_memcpy(gathered_x%x, gathered_x%x_d, n, HOST_TO_DEVICE, &
+            sync = .false.)
+       call device_memcpy(gathered_y%x, gathered_y%x_d, n, HOST_TO_DEVICE, &
+            sync = .false.)
+       call device_memcpy(gathered_z%x, gathered_z%x_d, n, HOST_TO_DEVICE, &
+            sync = .true.)
+    end if
+
+    call this%coef%gs_h%op(gathered_x%x, gathered_y%x, gathered_z%x, n, &
+         GS_OP_ADD)
+
+    if (NEKO_BCKND_DEVICE .eq. 1) then
+       call device_memcpy(gathered_x%x, gathered_x%x_d, n, DEVICE_TO_HOST, &
+            sync = .false.)
+       call device_memcpy(gathered_y%x, gathered_y%x_d, n, DEVICE_TO_HOST, &
+            sync = .false.)
+       call device_memcpy(gathered_z%x, gathered_z%x_d, n, DEVICE_TO_HOST, &
+            sync = .true.)
+    end if
+
+    do i = 1, m
+       k = this%unique_mask(i)
+       this%nx%x(i) = gathered_x%x(k)
+       this%ny%x(i) = gathered_y%x(k)
+       this%nz%x(i) = gathered_z%x(k)
        normal_magnitude = sqrt(this%nx%x(i)**2 + this%ny%x(i)**2 + &
             this%nz%x(i)**2)
        if (normal_magnitude .le. tiny(normal_magnitude)) then
@@ -124,6 +163,10 @@ contains
        this%ny%x(i) = this%ny%x(i) / normal_magnitude
        this%nz%x(i) = this%nz%x(i) / normal_magnitude
     end do
+
+    call gathered_x%free()
+    call gathered_y%free()
+    call gathered_z%free()
 
     if (NEKO_BCKND_DEVICE .eq. 1 .and. m .gt. 0) then
        call device_memcpy(this%nx%x, this%nx%x_d, m, HOST_TO_DEVICE, &
