@@ -840,9 +840,19 @@ contains
          .not. euler_idp_entropy_is_admissible(trial, gamma, entropy_lower, &
          internal_energy_floor)) then
        call limit_entropy(base, correction, entropy_lower, gamma, limit)
+       entropy_limited = .true.
     end if
     if (limit .gt. 0.0_rp) then
        limit = limit * (1.0_rp - 32.0_rp * epsilon(1.0_rp))
+    end if
+    if (enforce_entropy_constraint .and. limit .gt. 0.0_rp) then
+       trial = base + limit * correction
+       if (.not. euler_idp_entropy_is_admissible(trial, gamma, &
+            entropy_lower, internal_energy_floor)) then
+          call limit_entropy_bisection(base, correction, entropy_lower, &
+               gamma, internal_energy_floor, limit)
+          entropy_limited = .true.
+       end if
     end if
   end subroutine euler_idp_limit_endpoint
 
@@ -965,6 +975,44 @@ contains
     limit = left
   end subroutine limit_entropy
 
+  !> Restore the public entropy predicate when the fast line solve ends in
+  !! the roundoff band around the admissible-set boundary.
+  pure subroutine limit_entropy_bisection(base, correction, entropy_lower, &
+       gamma, internal_energy_floor, limit)
+    real(kind=rp), intent(in) :: base(EULER_IDP_NCOMP)
+    real(kind=rp), intent(in) :: correction(EULER_IDP_NCOMP)
+    real(kind=rp), intent(in) :: entropy_lower, gamma
+    real(kind=rp), intent(in) :: internal_energy_floor
+    real(kind=rp), intent(inout) :: limit
+    real(kind=rp) :: left, right, midpoint
+    real(kind=rp) :: trial(EULER_IDP_NCOMP)
+    integer :: iteration
+
+    trial = base + limit * correction
+    if (euler_idp_entropy_is_admissible(trial, gamma, entropy_lower, &
+         internal_energy_floor)) return
+    if (.not. euler_idp_entropy_is_admissible(base, gamma, entropy_lower, &
+         internal_energy_floor)) then
+       limit = 0.0_rp
+       return
+    end if
+
+    left = 0.0_rp
+    right = limit
+    do iteration = 1, 64
+       midpoint = left + 0.5_rp * (right - left)
+       if (midpoint .le. left .or. midpoint .ge. right) exit
+       trial = base + midpoint * correction
+       if (euler_idp_entropy_is_admissible(trial, gamma, entropy_lower, &
+            internal_energy_floor)) then
+          left = midpoint
+       else
+          right = midpoint
+       end if
+    end do
+    limit = left
+  end subroutine limit_entropy_bisection
+
   !> Internal-energy-density margin along a positive-density segment.
   pure real(kind=rp) function internal_energy_margin(state, energy_floor) &
        result(margin)
@@ -1036,6 +1084,14 @@ contains
     logical :: left_density_limited, right_density_limited
     logical :: left_energy_limited, right_energy_limited
     logical :: left_entropy_limited, right_entropy_limited
+    logical :: enforce_entropy_constraint
+    real(kind=rp) :: left_trial(EULER_IDP_NCOMP)
+    real(kind=rp) :: right_trial(EULER_IDP_NCOMP)
+
+    enforce_entropy_constraint = .true.
+    if (present(enforce_entropy)) then
+       enforce_entropy_constraint = enforce_entropy
+    end if
 
     call euler_idp_limit_endpoint(left_base, left_correction, &
          left_density_lower, left_density_upper, left_entropy_lower, gamma, &
@@ -1052,6 +1108,58 @@ contains
     density_limited = left_density_limited .or. right_density_limited
     energy_limited = left_energy_limited .or. right_energy_limited
     entropy_limited = left_entropy_limited .or. right_entropy_limited
+    if (enforce_entropy_constraint .and. limit .gt. 0.0_rp .and. &
+         limit .lt. 1.0_rp) then
+       left_trial = left_base + limit * left_correction
+       right_trial = right_base + limit * right_correction
+       if (.not. euler_idp_entropy_is_admissible(left_trial, gamma, &
+            left_entropy_lower, internal_energy_floor) .or. &
+            .not. euler_idp_entropy_is_admissible(right_trial, gamma, &
+            right_entropy_lower, internal_energy_floor)) then
+          call limit_edge_entropy_bisection(left_base, right_base, &
+               left_correction, right_correction, left_entropy_lower, &
+               right_entropy_lower, gamma, internal_energy_floor, limit)
+          entropy_limited = .true.
+       end if
+    end if
   end subroutine euler_idp_limit_edge
+
+  !> Restore admissibility of both endpoints after taking their symmetric
+  !! minimum coefficient in the entropy roundoff band.
+  pure subroutine limit_edge_entropy_bisection(left_base, right_base, &
+       left_correction, right_correction, left_entropy_lower, &
+       right_entropy_lower, gamma, internal_energy_floor, limit)
+    real(kind=rp), intent(in) :: left_base(EULER_IDP_NCOMP)
+    real(kind=rp), intent(in) :: right_base(EULER_IDP_NCOMP)
+    real(kind=rp), intent(in) :: left_correction(EULER_IDP_NCOMP)
+    real(kind=rp), intent(in) :: right_correction(EULER_IDP_NCOMP)
+    real(kind=rp), intent(in) :: left_entropy_lower, right_entropy_lower
+    real(kind=rp), intent(in) :: gamma, internal_energy_floor
+    real(kind=rp), intent(inout) :: limit
+    real(kind=rp) :: left, right, midpoint
+    real(kind=rp) :: left_trial(EULER_IDP_NCOMP)
+    real(kind=rp) :: right_trial(EULER_IDP_NCOMP)
+    logical :: left_admissible, right_admissible
+    integer :: iteration
+
+    left = 0.0_rp
+    right = limit
+    do iteration = 1, 64
+       midpoint = left + 0.5_rp * (right - left)
+       if (midpoint .le. left .or. midpoint .ge. right) exit
+       left_trial = left_base + midpoint * left_correction
+       right_trial = right_base + midpoint * right_correction
+       left_admissible = euler_idp_entropy_is_admissible(left_trial, &
+            gamma, left_entropy_lower, internal_energy_floor)
+       right_admissible = euler_idp_entropy_is_admissible(right_trial, &
+            gamma, right_entropy_lower, internal_energy_floor)
+       if (left_admissible .and. right_admissible) then
+          left = midpoint
+       else
+          right = midpoint
+       end if
+    end do
+    limit = left
+  end subroutine limit_edge_entropy_bisection
 
 end module euler_idp_backend

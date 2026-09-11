@@ -315,6 +315,39 @@ subroutine test_symmetric_edge_entropy_limit()
 end subroutine test_symmetric_edge_entropy_limit
 
 @test
+subroutine test_common_edge_limit_preserves_entropy()
+  use pfunit
+  use num_types, only : rp
+  use euler_idp_backend, only : euler_idp_entropy_is_admissible, &
+       euler_idp_limit_edge
+  implicit none
+
+  real(kind=rp), parameter :: gamma = 1.4_rp
+  real(kind=rp) :: left(5), right(5), left_correction(5)
+  real(kind=rp) :: right_correction(5), right_trial(5), limit
+  logical :: density_limited, energy_limited, entropy_limited, admissible
+
+  left = make_state(1.0_rp, 0.0_rp, 1.0_rp, gamma)
+  left_correction = [-1.0_rp, 0.0_rp, 0.0_rp, 0.0_rp, 0.0_rp]
+  right = [1.3999999834512895_rp, 1.5399999817964185_rp, &
+       0.0_rp, 0.0_rp, 3.347000008220051_rp]
+  right_correction = [1.7505352722935186e-10_rp, &
+       1.926976356259047e-10_rp, 0.0_rp, 0.0_rp, &
+       5.436056049745730e-10_rp]
+
+  call euler_idp_limit_edge(left, right, left_correction, &
+       right_correction, 0.001957814803758562_rp, 2.0_rp, &
+       1.0_rp, 2.0_rp, -100.0_rp, -0.4710611074281909_rp, &
+       gamma, 1.0e-12_rp, limit, density_limited, energy_limited, &
+       entropy_limited)
+
+  right_trial = right + limit * right_correction
+  admissible = euler_idp_entropy_is_admissible(right_trial, gamma, &
+       -0.4710611074281909_rp, 1.0e-12_rp)
+  @assertTrue(admissible)
+end subroutine test_common_edge_limit_preserves_entropy
+
+@test
 subroutine test_valid_base_fast_path_matches_checked_limiter()
   use pfunit
   use num_types, only : rp
