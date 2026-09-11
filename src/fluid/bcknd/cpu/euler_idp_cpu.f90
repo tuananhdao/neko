@@ -1088,11 +1088,13 @@ contains
     real(kind=rp) :: right_correction(EULER_IDP_NCOMP)
     real(kind=rp) :: left_entropy_bound, right_entropy_bound
     real(kind=rp) :: edge_limit
+    real(kind=rp) :: correction_scale, correction_size
     real(kind=rp) :: local_minimum, global_minimum
     integer :: local_count(5), global_count(5)
     integer :: direction, edge, component, ierr
     logical :: density_limited, energy_limited, entropy_limited
     logical :: check_base_constraints
+    logical :: negligible_correction
 
     call profiler_start_region('Euler IDP vector limiter')
     local_minimum = 1.0_rp
@@ -1129,17 +1131,33 @@ contains
             right_entropy_bound = this%entropy_lower_bound%x( &
                  b(1),b(2),b(3),b(4))
          end if
-         call euler_idp_limit_edge(left_base, right_base, &
-              left_correction, right_correction, &
-              this%density_lower_bound%x(a(1),a(2),a(3),a(4)), &
-              this%density_upper_bound%x(a(1),a(2),a(3),a(4)), &
-              this%density_lower_bound%x(b(1),b(2),b(3),b(4)), &
-              this%density_upper_bound%x(b(1),b(2),b(3),b(4)), &
-              left_entropy_bound, right_entropy_bound, gamma, &
-              internal_energy_floor, edge_limit, &
-              density_limited, energy_limited, entropy_limited, &
-              this%limit_internal_energy, this%limit_entropy, &
-              check_base_constraints)
+         correction_scale = max(1.0_rp, maxval(abs(left_base)), &
+              maxval(abs(right_base)))
+         correction_size = max(maxval(abs(left_correction)), &
+              maxval(abs(right_correction)))
+         negligible_correction = correction_size .le. &
+              512.0_rp * epsilon(1.0_rp) * correction_scale
+         if (negligible_correction) then
+            edge_limit = 1.0_rp
+            density_limited = .false.
+            energy_limited = .false.
+            entropy_limited = .false.
+            this%correction_flux(:,edge) = 0.0_rp
+            left_correction = 0.0_rp
+            right_correction = 0.0_rp
+         else
+            call euler_idp_limit_edge(left_base, right_base, &
+                 left_correction, right_correction, &
+                 this%density_lower_bound%x(a(1),a(2),a(3),a(4)), &
+                 this%density_upper_bound%x(a(1),a(2),a(3),a(4)), &
+                 this%density_lower_bound%x(b(1),b(2),b(3),b(4)), &
+                 this%density_upper_bound%x(b(1),b(2),b(3),b(4)), &
+                 left_entropy_bound, right_entropy_bound, gamma, &
+                 internal_energy_floor, edge_limit, &
+                 density_limited, energy_limited, entropy_limited, &
+                 this%limit_internal_energy, this%limit_entropy, &
+                 check_base_constraints)
+         end if
        end associate
        if (this%diagnostics_level .ne. EULER_IDP_DIAGNOSTICS_OFF) then
           if (.not. ieee_is_finite(edge_limit) .or. &
