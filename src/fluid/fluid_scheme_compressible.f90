@@ -689,8 +689,9 @@ contains
        call neko_error( &
             'Euler IDP requires zero physical viscosity and conductivity')
     end if
-    if (.not. ieee_is_finite(this%gamma) .or. this%gamma .le. 1.0_rp) then
-       call neko_error('Euler IDP requires a finite gamma greater than one')
+    if (.not. ieee_is_finite(this%gamma) .or. this%gamma .le. 1.0_rp .or. &
+         this%gamma .gt. 5.0_rp / 3.0_rp) then
+       call neko_error('Euler IDP requires finite gamma with 1 < gamma <= 5/3')
     end if
     local_valid = .true.
     if (this%msh%gdim .eq. 2) then

@@ -396,3 +396,24 @@ def test_idp_near_vacuum_evolution(
             atol=tolerance["rank_atol"],
             err_msg=f"1-rank and 2-rank {key} diagnostics differ",
         )
+
+
+@pytest.mark.skipif(conftest.USES_DEVICE, reason="Euler IDP is CPU-only")
+def test_idp_rejects_unsupported_gamma(
+    launcher_script, log_file, euler_idp_runtime
+):
+    """The IDP wave-speed guarantee is restricted to gamma <= 5/3."""
+    with pytest.raises(
+        AssertionError,
+        match=r"Euler IDP requires finite gamma with 1 < gamma <= 5/3",
+    ):
+        _run_case(
+            launcher_script,
+            log_file,
+            euler_idp_runtime,
+            "free_stream",
+            polynomial_order=2,
+            steps=1,
+            timestep=1.0e-4,
+            gamma=1.8,
+        )
