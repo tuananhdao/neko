@@ -235,25 +235,41 @@ contains
   end subroutine compressible_ops_cpu_update_mxyz_p_ruvw
 
   !> Update E field
-  subroutine compressible_ops_cpu_update_e(E, p, ruvw, gamma, n)
+  subroutine compressible_ops_cpu_update_e(E, p, ruvw, gamma, n, &
+       internal_energy_floor)
     integer, intent(in) :: n
     real(kind=rp), dimension(n), intent(inout) :: E, p
     ! ruvw = 0.5 * rho * (u^2 + v^2 + w^2)
     real(kind=rp), dimension(n), intent(in) :: ruvw
     real(kind=rp), intent(in) :: gamma
+    real(kind=rp), intent(in), optional :: internal_energy_floor
     integer :: i
-    real(kind=rp) :: inv_gamma_m1
+    real(kind=rp) :: inv_gamma_m1, internal_energy_floor_
+    real(kind=rp) :: roundoff_guard
+    logical :: enforce_internal_energy_floor
 
     inv_gamma_m1 = 1.0_rp / (gamma - 1.0_rp)
+    enforce_internal_energy_floor = present(internal_energy_floor)
+    internal_energy_floor_ = 0.0_rp
+    if (enforce_internal_energy_floor) then
+       internal_energy_floor_ = max(internal_energy_floor, 0.0_rp)
+    end if
 
     !OCL NORECURRENCE, NOVREC, NOALIAS
     !DIR$ CONCURRENT
     !DIR$ IVDEP
     !GCC$ ivdep
-    !$omp parallel do simd
+    !$omp parallel do simd private(roundoff_guard)
     do i = 1, n
        ! Ensure pressure is positive
        p(i) = max(p(i), 1.0e-12_rp)
+       if (enforce_internal_energy_floor .and. &
+            p(i) * inv_gamma_m1 .le. internal_energy_floor_) then
+          roundoff_guard = 32.0_rp * epsilon(1.0_rp) * &
+               max(1.0_rp, abs(ruvw(i)), internal_energy_floor_)
+          p(i) = (gamma - 1.0_rp) * &
+               (internal_energy_floor_ + roundoff_guard)
+       end if
        ! E = p / (gamma - 1) + 0.5 * rho * (u^2 + v^2 + w^2)
        E(i) = p(i) * inv_gamma_m1 + ruvw(i)
     end do

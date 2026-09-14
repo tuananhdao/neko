@@ -1453,7 +1453,7 @@ contains
        call pressure_bcs%apply(this%p, strong = .true.)
     end if
     call compressible_ops_cpu_update_e(energy%x, this%p%x, &
-         this%internal_energy%x, gamma, n)
+         this%internal_energy%x, gamma, n, internal_energy_floor)
 
     call euler_idp_cpu_primitives(this, rho, m_x, m_y, m_z, energy, gamma, &
          internal_energy_floor, label)

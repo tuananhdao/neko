@@ -42,7 +42,7 @@ def _tail(path, line_count=60):
 
 @pytest.fixture(scope="session")
 def euler_idp_runtime(tmp_path_factory):
-    """Build one instrumented solver and one checked periodic box mesh."""
+    """Build one instrumented solver and the meshes used by the IDP tests."""
     work_dir = tmp_path_factory.mktemp("euler_idp")
     makeneko = _resolve_executable(get_makeneko())
     genmeshbox = _resolve_executable(get_genmeshbox())
@@ -77,59 +77,83 @@ def euler_idp_runtime(tmp_path_factory):
         + compile_result.stdout
     )
 
-    mesh_result = subprocess.run(
-        [
-            str(genmeshbox),
-            "0", "1", "0", "1", "0", "1",
-            "4", "4", "1", ".true.", ".true.", ".true.",
-        ],
-        cwd=work_dir,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT,
-        text=True,
-        errors="replace",
-        env=environment,
-    )
-    assert mesh_result.returncode == 0, (
-        "genmeshbox failed for the periodic Euler IDP mesh:\n"
-        + mesh_result.stdout
-    )
+    def generate_mesh(name, elements, periodic):
+        mesh_result = subprocess.run(
+            [
+                str(genmeshbox),
+                "0", "1", "0", "1", "0", "1",
+                *(str(value) for value in elements),
+                *(".true." if value else ".false." for value in periodic),
+            ],
+            cwd=work_dir,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            errors="replace",
+            env=environment,
+        )
+        assert mesh_result.returncode == 0, (
+            f"genmeshbox failed for {name}:\n" + mesh_result.stdout
+        )
 
-    mesh = work_dir / "box.nmsh"
-    check_result = subprocess.run(
-        [str(mesh_checker), mesh.name],
-        cwd=work_dir,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT,
-        text=True,
-        errors="replace",
-        env=environment,
+        mesh = work_dir / f"{name}.nmsh"
+        (work_dir / "box.nmsh").replace(mesh)
+        check_result = subprocess.run(
+            [str(mesh_checker), mesh.name],
+            cwd=work_dir,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            errors="replace",
+            env=environment,
+        )
+        assert check_result.returncode == 0, (
+            f"mesh_checker rejected {name}:\n" + check_result.stdout
+        )
+        return mesh
+
+    periodic_mesh = generate_mesh(
+        "periodic_box", (4, 4, 1), (True, True, True)
     )
-    assert check_result.returncode == 0, (
-        "mesh_checker rejected the periodic Euler IDP mesh:\n"
-        + check_result.stdout
+    bounded_x_mesh = generate_mesh(
+        "bounded_x_box", (4, 2, 1), (False, True, True)
+    )
+    bounded_xy_mesh = generate_mesh(
+        "bounded_xy_box", (4, 2, 1), (False, False, True)
     )
 
     return {
         "directory": work_dir,
         "environment": environment,
-        "mesh": mesh,
+        "mesh": periodic_mesh,
+        "bounded_x_mesh": bounded_x_mesh,
+        "bounded_xy_mesh": bounded_xy_mesh,
         "neko": work_dir / "neko",
     }
 
 
-def _case(problem, runtime, polynomial_order, steps, timestep, gamma=1.4):
-    """Build a short, output-free, fully periodic SSPRK3 case."""
+def _case(
+    problem,
+    runtime,
+    polynomial_order,
+    steps,
+    timestep,
+    gamma=1.4,
+    mesh=None,
+    boundary_conditions=None,
+    internal_energy_floor=NEAR_VACUUM_FLOOR,
+    limit_entropy=True,
+):
+    """Build a short, output-free SSPRK3 case."""
     output_dir = runtime["directory"] / (
         f"output_{problem}_p{polynomial_order}"
     )
     output_dir.mkdir(exist_ok=True)
-    floor = NEAR_VACUUM_FLOOR
-    return {
+    case_data = {
         "version": 1.0,
         "test": {"problem": problem},
         "case": {
-            "mesh_file": str(runtime["mesh"]),
+            "mesh_file": str(mesh or runtime["mesh"]),
             "output_directory": str(output_dir),
             "output_at_end": False,
             "output_boundary": False,
@@ -149,8 +173,8 @@ def _case(problem, runtime, polynomial_order, steps, timestep, gamma=1.4):
                     "low_order_only": False,
                     "relax_density_bounds": False,
                     "limit_internal_energy": True,
-                    "limit_entropy": True,
-                    "internal_energy_floor": floor,
+                    "limit_entropy": limit_entropy,
+                    "internal_energy_floor": internal_energy_floor,
                     "diagnostics_level": "full",
                     "diagnostics_interval": 1,
                 },
@@ -163,6 +187,11 @@ def _case(problem, runtime, polynomial_order, steps, timestep, gamma=1.4):
             },
         },
     }
+    if boundary_conditions is not None:
+        case_data["case"]["fluid"]["boundary_conditions"] = (
+            boundary_conditions
+        )
+    return case_data
 
 
 def _parse_summary(log_path):
@@ -175,6 +204,7 @@ def _parse_summary(log_path):
         "EULER_IDP_STATE": None,
         "EULER_IDP_BOUNDS": None,
         "EULER_IDP_CONSERVATION": None,
+        "EULER_IDP_BOUNDARY": None,
     }
     for line in log_path.read_text(errors="replace").splitlines():
         stripped = line.strip()
@@ -201,6 +231,7 @@ def _parse_summary(log_path):
         "stage_conservation": np.asarray(
             tags["EULER_IDP_CONSERVATION"], dtype=float
         ),
+        "boundary": np.asarray(tags["EULER_IDP_BOUNDARY"], dtype=float),
     }
     return summary
 
@@ -215,10 +246,23 @@ def _run_case(
     timestep,
     mpi_ranks=1,
     gamma=1.4,
+    mesh=None,
+    boundary_conditions=None,
+    internal_energy_floor=NEAR_VACUUM_FLOOR,
+    limit_entropy=True,
 ):
     """Write, run, and parse one generated Euler IDP case."""
     case_data = _case(
-        problem, runtime, polynomial_order, steps, timestep, gamma
+        problem,
+        runtime,
+        polynomial_order,
+        steps,
+        timestep,
+        gamma,
+        mesh,
+        boundary_conditions,
+        internal_energy_floor,
+        limit_entropy,
     )
     suffix = f"{problem}_p{polynomial_order}_n{mpi_ranks}"
     case_file = runtime["directory"] / f"{suffix}.case"
@@ -257,9 +301,42 @@ def _run_case(
         "state",
         "bounds",
         "stage_conservation",
+        "boundary",
     ):
         assert np.all(np.isfinite(summary[key])), f"non-finite {key}: {summary[key]}"
     return summary
+
+
+def _primitive_boundary_conditions(boundary_type, density=1.4):
+    """Return the case entries for one isolated x-boundary contract."""
+    if boundary_type == "prescribed":
+        return [
+            {
+                "type": "velocity_value",
+                "zone_indices": [1, 2],
+                "value": [0.8, -0.2, 0.1],
+            },
+            {
+                "type": "density_value",
+                "zone_indices": [1, 2],
+                "value": density,
+            },
+            {
+                "type": "pressure_value",
+                "zone_indices": [1, 2],
+                "value": 1.0,
+            },
+        ]
+    return [{"type": boundary_type, "zone_indices": [1, 2]}]
+
+
+def _assert_boundary_contract(summary, floor=NEAR_VACUUM_FLOOR):
+    """Check the synthetic boundary map and evolved state."""
+    tolerance = _tolerances()
+    assert np.max(summary["boundary"][:7]) <= tolerance["roundoff"]
+    assert summary["boundary"][7] >= floor
+    assert np.min(summary["state"][[0, 2]]) > 0.0
+    assert np.min(summary["state"][[1, 3]]) >= floor
 
 
 def _tolerances():
@@ -416,4 +493,123 @@ def test_idp_rejects_unsupported_gamma(
             steps=1,
             timestep=1.0e-4,
             gamma=1.8,
+        )
+
+
+@pytest.mark.skipif(conftest.USES_DEVICE, reason="Euler IDP is CPU-only")
+@pytest.mark.parametrize(
+    "boundary_type",
+    ("prescribed", "symmetry", "slip", "outflow", "normal_outflow"),
+)
+def test_idp_boundary_map_contracts(
+    launcher_script, log_file, euler_idp_runtime, boundary_type
+):
+    """Each supported Euler boundary map preserves its primitive contract."""
+    summary = _run_case(
+        launcher_script,
+        log_file,
+        euler_idp_runtime,
+        f"boundary_{boundary_type}",
+        polynomial_order=3,
+        steps=2,
+        timestep=1.0e-6,
+        mesh=euler_idp_runtime["bounded_x_mesh"],
+        boundary_conditions=_primitive_boundary_conditions(boundary_type),
+    )
+    _assert_boundary_contract(summary)
+
+
+@pytest.mark.skipif(conftest.USES_DEVICE, reason="Euler IDP is CPU-only")
+def test_idp_outflow_respects_internal_energy_floor(
+    launcher_script, log_file, euler_idp_runtime
+):
+    """Pressure reconstruction honors a configured floor above 1e-12."""
+    floor = 1.0e-8
+    summary = _run_case(
+        launcher_script,
+        log_file,
+        euler_idp_runtime,
+        "boundary_outflow_floor",
+        polynomial_order=3,
+        steps=2,
+        timestep=1.0e-6,
+        mesh=euler_idp_runtime["bounded_x_mesh"],
+        boundary_conditions=_primitive_boundary_conditions("outflow"),
+        internal_energy_floor=floor,
+    )
+    _assert_boundary_contract(summary, floor=floor)
+
+
+@pytest.mark.skipif(conftest.USES_DEVICE, reason="Euler IDP is CPU-only")
+def test_idp_rejects_nonpositive_prescribed_boundary_density(
+    launcher_script, log_file, euler_idp_runtime
+):
+    """An inadmissible prescribed primitive state fails at the boundary map."""
+    with pytest.raises(AssertionError, match=r"Euler IDP.*density"):
+        _run_case(
+            launcher_script,
+            log_file,
+            euler_idp_runtime,
+            "boundary_invalid_density",
+            polynomial_order=2,
+            steps=1,
+            timestep=1.0e-6,
+            mesh=euler_idp_runtime["bounded_x_mesh"],
+            boundary_conditions=_primitive_boundary_conditions(
+                "prescribed", density=-1.0
+            ),
+        )
+
+
+@pytest.mark.skipif(conftest.USES_DEVICE, reason="Euler IDP is CPU-only")
+def test_idp_mixed_boundaries_are_rank_invariant(
+    launcher_script, log_file, euler_idp_runtime
+):
+    """Inlet, slip walls, and outflow compose through SSPRK3 on 1/2 ranks."""
+    if configure_nprocs(2) < 2:
+        pytest.skip("This test requires two MPI ranks")
+
+    boundary_conditions = [
+        {
+            "type": "velocity_value",
+            "zone_indices": [1],
+            "value": [0.8, 0.0, 0.1],
+        },
+        {"type": "density_value", "zone_indices": [1], "value": 1.4},
+        {"type": "pressure_value", "zone_indices": [1], "value": 1.0},
+        {"type": "outflow", "zone_indices": [2]},
+        {"type": "slip", "zone_indices": [3, 4]},
+    ]
+    runs = []
+    for mpi_ranks in (1, 2):
+        summary = _run_case(
+            launcher_script,
+            log_file,
+            euler_idp_runtime,
+            "boundary_mixed",
+            polynomial_order=3,
+            steps=3,
+            timestep=1.0e-9,
+            mpi_ranks=mpi_ranks,
+            mesh=euler_idp_runtime["bounded_xy_mesh"],
+            boundary_conditions=boundary_conditions,
+            limit_entropy=False,
+        )
+        _assert_boundary_contract(summary)
+        runs.append(summary)
+
+    tolerance = _tolerances()
+    for key in (
+        "limiter",
+        "state",
+        "bounds",
+        "stage_conservation",
+        "boundary",
+    ):
+        np.testing.assert_allclose(
+            runs[0][key],
+            runs[1][key],
+            rtol=tolerance["rank_rtol"],
+            atol=tolerance["rank_atol"],
+            err_msg=f"1-rank and 2-rank {key} diagnostics differ",
         )

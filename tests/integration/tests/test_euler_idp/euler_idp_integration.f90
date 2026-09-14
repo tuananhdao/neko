@@ -2,7 +2,9 @@
 module user
   use, intrinsic :: ieee_arithmetic, only : ieee_is_finite
   use neko
+  use comm, only : NEKO_COMM, MPI_REAL_PRECISION
   use fluid_scheme_compressible_ns, only : fluid_scheme_compressible_ns_t
+  use mpi_f08, only : MPI_Allreduce, MPI_MAX, MPI_MIN
   implicit none
 
   character(len=:), allocatable :: problem
@@ -19,6 +21,7 @@ module user
   real(kind=rp) :: maximum_density_upper_violation = 0.0_rp
   real(kind=rp) :: maximum_entropy_lower_violation = 0.0_rp
   real(kind=rp) :: maximum_stage_conservation(5) = 0.0_rp
+  real(kind=rp) :: boundary_metrics(8) = 0.0_rp
   integer :: stage_count = 0
   logical :: all_stages_finite = .true.
 
@@ -47,7 +50,7 @@ contains
          'case.numerics.euler_idp.internal_energy_floor', energy_floor)
   end subroutine startup
 
-  !> Set one of the four periodic Euler states exercised by pytest.
+  !> Set one of the Euler states exercised by pytest.
   subroutine initial_conditions(scheme_name, fields)
     character(len=*), intent(in) :: scheme_name
     type(field_list_t), intent(inout) :: fields
@@ -105,6 +108,36 @@ contains
              p%x(i, 1, 1, 1) = &
                   (gamma_ref - 1.0_rp) * 1.0e-10_rp
           end if
+       case ('boundary_prescribed', 'boundary_symmetry', 'boundary_slip', &
+            'boundary_invalid_density')
+          rho%x(i, 1, 1, 1) = 1.25_rp
+          u%x(i, 1, 1, 1) = 0.6_rp
+          v%x(i, 1, 1, 1) = -0.4_rp
+          w%x(i, 1, 1, 1) = 0.2_rp
+          p%x(i, 1, 1, 1) = 0.8_rp
+       case ('boundary_outflow', 'boundary_normal_outflow')
+          rho%x(i, 1, 1, 1) = 1.25_rp
+          u%x(i, 1, 1, 1) = 0.6_rp
+          v%x(i, 1, 1, 1) = -0.4_rp
+          w%x(i, 1, 1, 1) = 0.2_rp
+          p%x(i, 1, 1, 1) = max(1.0e-12_rp, &
+               (gamma_ref - 1.0_rp) * energy_floor)
+       case ('boundary_outflow_floor')
+          rho%x(i, 1, 1, 1) = 1.25_rp
+          u%x(i, 1, 1, 1) = 0.6_rp
+          v%x(i, 1, 1, 1) = -0.4_rp
+          w%x(i, 1, 1, 1) = 0.2_rp
+          p%x(i, 1, 1, 1) = &
+               2.0_rp * (gamma_ref - 1.0_rp) * energy_floor
+       case ('boundary_mixed')
+          rho%x(i, 1, 1, 1) = 1.25_rp + 0.15_rp * (1.0_rp - x)
+          u%x(i, 1, 1, 1) = 0.6_rp + 0.2_rp * (1.0_rp - x)
+          v%x(i, 1, 1, 1) = 0.0_rp
+          w%x(i, 1, 1, 1) = 0.2_rp - 0.1_rp * (1.0_rp - x)
+          p%x(i, 1, 1, 1) = max(1.0e-12_rp, &
+               (gamma_ref - 1.0_rp) * energy_floor) + &
+               (1.0_rp - max(1.0e-12_rp, &
+               (gamma_ref - 1.0_rp) * energy_floor)) * (1.0_rp - x)
        case default
           call neko_error('Unknown Euler IDP integration-test problem')
        end select
@@ -129,7 +162,164 @@ contains
     initial_integrals(3) = glsc2(m_y%x, coef%B, rho%size())
     initial_integrals(4) = glsc2(m_z%x, coef%B, rho%size())
     initial_integrals(5) = glsc2(energy%x, coef%B, rho%size())
+
+    if (index(trim(problem), 'boundary_') .eq. 1) then
+       call probe_boundary_map(time)
+    end if
   end subroutine initialize
+
+  !> Exercise the production boundary map on an isolated conserved state.
+  subroutine probe_boundary_map(time)
+    type(time_state_t), intent(in) :: time
+    type(field_t) :: rho, m_x, m_y, m_z, energy
+    real(kind=rp), allocatable :: mapped(:,:)
+    real(kind=rp) :: density, velocity(3), pressure, total_energy
+    real(kind=rp) :: expected_density, expected_velocity(3)
+    real(kind=rp) :: expected_pressure, expected_energy
+    real(kind=rp) :: local_errors(7), local_minimum
+    real(kind=rp) :: internal_energy, kinetic, x, y
+    logical :: is_boundary
+    integer :: i, ierr, n
+
+    select type (fluid => neko_user_access%case%fluid)
+    type is (fluid_scheme_compressible_ns_t)
+       call rho%init(fluid%rho%dof, 'boundary_probe_rho')
+       call m_x%init(fluid%rho%dof, 'boundary_probe_m_x')
+       call m_y%init(fluid%rho%dof, 'boundary_probe_m_y')
+       call m_z%init(fluid%rho%dof, 'boundary_probe_m_z')
+       call energy%init(fluid%rho%dof, 'boundary_probe_energy')
+       n = rho%size()
+       allocate(mapped(5, n))
+
+       density = 1.25_rp
+       velocity = [0.6_rp, -0.4_rp, 0.2_rp]
+       pressure = 0.8_rp
+       total_energy = pressure / (gamma_ref - 1.0_rp) + &
+            0.5_rp * density * dot_product(velocity, velocity)
+       rho%x = density
+       m_x%x = density * velocity(1)
+       m_y%x = density * velocity(2)
+       m_z%x = density * velocity(3)
+       energy%x = total_energy
+
+       call fluid%euler_idp_solver%backend%apply_boundary_conditions( &
+            rho, m_x, m_y, m_z, energy, fluid%bcs_density, &
+            fluid%bcs_vel, fluid%bcs_prs, gamma_ref, energy_floor, time, &
+            'boundary regression probe', refresh = .true.)
+
+       local_errors = 0.0_rp
+       local_minimum = huge(1.0_rp)
+       do i = 1, n
+          x = rho%dof%x(i, 1, 1, 1)
+          y = rho%dof%y(i, 1, 1, 1)
+          call expected_boundary_state(x, y, expected_density, &
+               expected_velocity, expected_pressure, expected_energy, &
+               is_boundary)
+          if (is_boundary) then
+             density = rho%x(i, 1, 1, 1)
+             velocity = [m_x%x(i, 1, 1, 1), m_y%x(i, 1, 1, 1), &
+                  m_z%x(i, 1, 1, 1)] / density
+             kinetic = 0.5_rp * density * dot_product(velocity, velocity)
+             internal_energy = energy%x(i, 1, 1, 1) - kinetic
+             pressure = (gamma_ref - 1.0_rp) * internal_energy
+             local_errors(1) = max(local_errors(1), &
+                  abs(density - expected_density))
+             local_errors(2:4) = max(local_errors(2:4), &
+                  abs(velocity - expected_velocity))
+             local_errors(5) = max(local_errors(5), &
+                  abs(pressure - expected_pressure))
+             local_errors(6) = max(local_errors(6), &
+                  abs(energy%x(i, 1, 1, 1) - expected_energy))
+             local_minimum = min(local_minimum, internal_energy)
+          end if
+          mapped(:,i) = [rho%x(i, 1, 1, 1), m_x%x(i, 1, 1, 1), &
+               m_y%x(i, 1, 1, 1), m_z%x(i, 1, 1, 1), &
+               energy%x(i, 1, 1, 1)]
+       end do
+
+       call fluid%euler_idp_solver%backend%apply_boundary_conditions( &
+            rho, m_x, m_y, m_z, energy, fluid%bcs_density, &
+            fluid%bcs_vel, fluid%bcs_prs, gamma_ref, energy_floor, time, &
+            'repeated boundary regression probe', refresh = .true.)
+       do i = 1, n
+          local_errors(7) = max(local_errors(7), maxval(abs( &
+               [rho%x(i, 1, 1, 1), m_x%x(i, 1, 1, 1), &
+               m_y%x(i, 1, 1, 1), m_z%x(i, 1, 1, 1), &
+               energy%x(i, 1, 1, 1)] - mapped(:,i))))
+       end do
+
+       call MPI_Allreduce(local_errors, boundary_metrics(1:7), 7, &
+            MPI_REAL_PRECISION, MPI_MAX, NEKO_COMM, ierr)
+       call MPI_Allreduce(local_minimum, boundary_metrics(8), 1, &
+            MPI_REAL_PRECISION, MPI_MIN, NEKO_COMM, ierr)
+
+       deallocate(mapped)
+       call rho%free()
+       call m_x%free()
+       call m_y%free()
+       call m_z%free()
+       call energy%free()
+    class default
+       call neko_error('Euler IDP test requires the compressible scheme')
+    end select
+  end subroutine probe_boundary_map
+
+  !> Return the expected result of the strong primitive boundary map.
+  subroutine expected_boundary_state(x, y, density, velocity, pressure, &
+       energy, is_boundary)
+    real(kind=rp), intent(in) :: x, y
+    real(kind=rp), intent(out) :: density, velocity(3), pressure, energy
+    logical, intent(out) :: is_boundary
+    real(kind=rp) :: base_energy, kinetic, pressure_floor, tolerance
+
+    tolerance = 128.0_rp * epsilon(1.0_rp)
+    density = 1.25_rp
+    velocity = [0.6_rp, -0.4_rp, 0.2_rp]
+    pressure = 0.8_rp
+    base_energy = pressure / (gamma_ref - 1.0_rp) + &
+         0.5_rp * density * dot_product(velocity, velocity)
+    pressure_floor = max(1.0e-12_rp, &
+         (gamma_ref - 1.0_rp) * energy_floor)
+    is_boundary = x .le. tolerance .or. x .ge. 1.0_rp - tolerance
+
+    select case (trim(problem))
+    case ('boundary_prescribed', 'boundary_invalid_density')
+       density = 1.4_rp
+       velocity = [0.8_rp, -0.2_rp, 0.1_rp]
+    case ('boundary_symmetry', 'boundary_slip')
+       velocity(1) = 0.0_rp
+    case ('boundary_outflow', 'boundary_normal_outflow', &
+         'boundary_outflow_floor')
+       continue
+    case ('boundary_mixed')
+       is_boundary = is_boundary .or. y .le. tolerance .or. &
+            y .ge. 1.0_rp - tolerance
+       if (x .le. tolerance) then
+          density = 1.4_rp
+          velocity = [0.8_rp, 0.0_rp, 0.1_rp]
+       end if
+       if (y .le. tolerance .or. y .ge. 1.0_rp - tolerance) then
+          velocity(2) = 0.0_rp
+       end if
+    case default
+       call neko_error('Unknown Euler IDP boundary regression problem')
+    end select
+
+    kinetic = 0.5_rp * density * dot_product(velocity, velocity)
+    pressure = (gamma_ref - 1.0_rp) * (base_energy - kinetic)
+    if (trim(problem) .eq. 'boundary_prescribed' .or. &
+         trim(problem) .eq. 'boundary_invalid_density') then
+       pressure = 1.0_rp
+    else if (trim(problem) .eq. 'boundary_outflow' .or. &
+         trim(problem) .eq. 'boundary_normal_outflow' .or. &
+         trim(problem) .eq. 'boundary_outflow_floor') then
+       pressure = pressure_floor
+    else if (trim(problem) .eq. 'boundary_mixed') then
+       if (x .le. tolerance) pressure = 1.0_rp
+       if (x .ge. 1.0_rp - tolerance) pressure = pressure_floor
+    end if
+    energy = pressure / (gamma_ref - 1.0_rp) + kinetic
+  end subroutine expected_boundary_state
 
   !> Reduce the diagnostics over every SSPRK3 stage and time step.
   subroutine monitor_stages(time)
@@ -255,6 +445,8 @@ contains
             maximum_entropy_lower_violation
        write(*, '(A,5(1X,ES25.16E3))') 'EULER_IDP_CONSERVATION', &
             maximum_stage_conservation
+       write(*, '(A,8(1X,ES25.16E3))') 'EULER_IDP_BOUNDARY', &
+            boundary_metrics
     end if
 
     deallocate(work)
