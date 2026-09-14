@@ -21,6 +21,179 @@ subroutine test_zero_viscosity_bar_state()
 end subroutine test_zero_viscosity_bar_state
 
 @test
+subroutine test_conserved_to_primitive()
+  use pfunit
+  use num_types, only : rp
+  use compressible_ops_cpu, only : &
+       compressible_ops_cpu_conserved_to_primitive, EULER_STATE_OK
+  implicit none
+
+  integer, parameter :: n = 3
+  real(kind=rp), parameter :: gamma = 1.4_rp
+  real(kind=rp) :: rho(n), m_x(n), m_y(n), m_z(n), energy(n)
+  real(kind=rp) :: energy_before(n), rho_primitive(n)
+  real(kind=rp) :: u(n), v(n), w(n), pressure(n), sound_speed(n)
+  real(kind=rp) :: internal_energy(n), expected_internal_energy(n)
+  real(kind=rp) :: expected_pressure(n), expected_sound_speed(n)
+  real(kind=rp) :: tolerance
+  integer :: status(n)
+
+  rho = [1.0_rp, 2.0_rp, 1.0_rp]
+  m_x = [2.0_rp, -1.0_rp, 100.0_rp]
+  m_y = [0.5_rp, 0.0_rp, 0.0_rp]
+  m_z = [0.0_rp, 1.0_rp, 0.0_rp]
+  expected_internal_energy = [3.0_rp, 5.0_rp, 2.0_rp]
+  energy = expected_internal_energy + &
+       0.5_rp * (m_x**2 + m_y**2 + m_z**2) / rho
+  energy_before = energy
+  expected_pressure = (gamma - 1.0_rp) * expected_internal_energy
+  expected_sound_speed = sqrt(gamma * expected_pressure / rho)
+  tolerance = 256.0_rp * epsilon(1.0_rp) * maxval(energy)
+
+  call compressible_ops_cpu_conserved_to_primitive(rho, m_x, m_y, m_z, &
+       energy, gamma, 1.0e-12_rp, rho_primitive, u, v, w, pressure, &
+       sound_speed, internal_energy, status, n)
+
+  @assertEqual([EULER_STATE_OK, EULER_STATE_OK, EULER_STATE_OK], status)
+  @assertEqual(rho, rho_primitive, tolerance=tolerance)
+  @assertEqual(m_x / rho, u, tolerance=tolerance)
+  @assertEqual(m_y / rho, v, tolerance=tolerance)
+  @assertEqual(m_z / rho, w, tolerance=tolerance)
+  @assertEqual(expected_internal_energy, internal_energy, tolerance=tolerance)
+  @assertEqual(expected_pressure, pressure, tolerance=tolerance)
+  @assertEqual(expected_sound_speed, sound_speed, tolerance=tolerance)
+  @assertEqual(energy_before, energy, tolerance=tolerance)
+end subroutine test_conserved_to_primitive
+
+@test
+subroutine test_primitive_status_codes()
+  use pfunit
+  use num_types, only : rp
+  use compressible_ops_cpu, only : &
+       compressible_ops_cpu_conserved_to_primitive, EULER_STATE_OK, &
+       EULER_STATE_INVALID_GAMMA, EULER_STATE_INVALID_DENSITY, &
+       EULER_STATE_INVALID_INTERNAL_ENERGY
+  use, intrinsic :: ieee_arithmetic, only : ieee_value, ieee_quiet_nan
+  implicit none
+
+  integer, parameter :: n = 6
+  real(kind=rp) :: rho(n), m_x(n), m_y(n), m_z(n), energy(n)
+  real(kind=rp) :: rho_primitive(n), u(n), v(n), w(n), pressure(n)
+  real(kind=rp) :: sound_speed(n), internal_energy(n), quiet_nan
+  integer :: status(n), expected_status(n)
+
+  rho = 1.0_rp
+  m_x = 0.0_rp
+  m_y = 0.0_rp
+  m_z = 0.0_rp
+  energy = 2.0_rp
+  call compressible_ops_cpu_conserved_to_primitive(rho, m_x, m_y, m_z, &
+       energy, 1.0_rp, 1.0_rp, rho_primitive, u, v, w, pressure, &
+       sound_speed, internal_energy, status, n)
+  expected_status = EULER_STATE_INVALID_GAMMA
+  @assertEqual(expected_status, status)
+  @assertEqual(0.0_rp, maxval(abs(u)))
+  @assertEqual(0.0_rp, maxval(abs(pressure)))
+
+  quiet_nan = ieee_value(0.0_rp, ieee_quiet_nan)
+  rho = [0.0_rp, -1.0_rp, quiet_nan, 1.0_rp, 1.0_rp, 1.0_rp]
+  m_x = [0.0_rp, 0.0_rp, 0.0_rp, quiet_nan, 2.0_rp, 2.0_rp]
+  m_y = 0.0_rp
+  m_z = 0.0_rp
+  energy = [2.0_rp, 2.0_rp, 2.0_rp, 2.0_rp, 2.5_rp, 3.0_rp]
+  call compressible_ops_cpu_conserved_to_primitive(rho, m_x, m_y, m_z, &
+       energy, 1.4_rp, 1.0_rp, rho_primitive, u, v, w, pressure, &
+       sound_speed, internal_energy, status, n)
+
+  expected_status = [EULER_STATE_INVALID_DENSITY, &
+       EULER_STATE_INVALID_DENSITY, EULER_STATE_INVALID_DENSITY, &
+       EULER_STATE_INVALID_INTERNAL_ENERGY, &
+       EULER_STATE_INVALID_INTERNAL_ENERGY, EULER_STATE_OK]
+  @assertEqual(expected_status, status)
+  @assertEqual(0.0_rp, u(4))
+  @assertEqual(0.0_rp, pressure(5))
+  @assertEqual(1.0_rp, internal_energy(6), tolerance=16.0_rp * epsilon(1.0_rp))
+end subroutine test_primitive_status_codes
+
+@test
+subroutine test_wave_speed_bounds_riemann_fan()
+  use pfunit
+  use num_types, only : rp
+  use euler_idp_backend, only : euler_idp_maximum_wave_speed
+  use, intrinsic :: ieee_arithmetic, only : ieee_is_finite
+  implicit none
+
+  real(kind=rp) :: left(5), right(5), normal(3), gamma
+  real(kind=rp) :: estimate, reverse_estimate, reference, tolerance
+  integer :: case_index
+
+  do case_index = 1, 5
+     call riemann_test_case(case_index, gamma, left, right, normal)
+     estimate = euler_idp_maximum_wave_speed(left, right, normal, gamma)
+     reverse_estimate = euler_idp_maximum_wave_speed(right, left, &
+          -normal, gamma)
+     reference = exact_riemann_maximum_speed(left, right, normal, gamma)
+     tolerance = 2.0e-11_rp * max(1.0_rp, estimate, reference)
+
+     @assertTrue(ieee_is_finite(estimate))
+     @assertTrue(estimate .ge. 0.0_rp)
+     @assertEqual(estimate, reverse_estimate, tolerance=tolerance)
+     @assertTrue(estimate + tolerance .ge. reference)
+  end do
+end subroutine test_wave_speed_bounds_riemann_fan
+
+@test
+subroutine test_nontrivial_bar_state_invariants()
+  use pfunit
+  use num_types, only : rp
+  use euler_idp_backend, only : euler_idp_bar_state, &
+       euler_idp_flux_dot_vector, euler_idp_internal_energy, &
+       euler_idp_maximum_wave_speed, euler_idp_specific_entropy, &
+       euler_idp_state_is_admissible
+  implicit none
+
+  real(kind=rp) :: left(5), right(5), normal(3), coefficient(3), gamma
+  real(kind=rp) :: left_flux(5), right_flux(5), reverse_left_flux(5)
+  real(kind=rp) :: reverse_right_flux(5), bar_state(5), reverse_bar_state(5)
+  real(kind=rp) :: wave_speed, viscosity, scale, entropy_lower, tolerance
+  real(kind=rp) :: bar_difference, bar_entropy
+  integer :: case_index
+
+  do case_index = 1, 5
+     call riemann_test_case(case_index, gamma, left, right, normal)
+     scale = 0.5_rp + 0.25_rp * real(case_index, rp)
+     coefficient = scale * normal
+     wave_speed = euler_idp_maximum_wave_speed(left, right, normal, gamma)
+     viscosity = scale * wave_speed
+     call euler_idp_flux_dot_vector(left, coefficient, gamma, left_flux)
+     call euler_idp_flux_dot_vector(right, coefficient, gamma, right_flux)
+     call euler_idp_bar_state(left, right, right_flux - left_flux, &
+          viscosity, bar_state)
+
+     call euler_idp_flux_dot_vector(right, -coefficient, gamma, &
+          reverse_left_flux)
+     call euler_idp_flux_dot_vector(left, -coefficient, gamma, &
+          reverse_right_flux)
+     call euler_idp_bar_state(right, left, &
+          reverse_right_flux - reverse_left_flux, viscosity, &
+          reverse_bar_state)
+
+     tolerance = 2048.0_rp * epsilon(1.0_rp) * &
+          max(1.0_rp, maxval(abs(bar_state)))
+     bar_difference = maxval(abs(bar_state - 0.5_rp * (left + right)))
+     entropy_lower = min(euler_idp_specific_entropy(left, gamma), &
+          euler_idp_specific_entropy(right, gamma))
+     bar_entropy = euler_idp_specific_entropy(bar_state, gamma)
+     @assertTrue(viscosity .gt. 0.0_rp)
+     @assertTrue(bar_difference .gt. tolerance)
+     @assertTrue(euler_idp_state_is_admissible(bar_state, 0.0_rp))
+     @assertTrue(euler_idp_internal_energy(bar_state) .gt. 0.0_rp)
+     @assertTrue(bar_entropy + tolerance .ge. entropy_lower)
+     @assertEqual(bar_state, reverse_bar_state, tolerance=tolerance)
+  end do
+end subroutine test_nontrivial_bar_state_invariants
+
+@test
 subroutine test_specific_entropy()
   use pfunit
   use num_types, only : rp
@@ -595,6 +768,150 @@ subroutine test_stage_cache_invalidation()
   @assertFalse(stage%primitive_valid)
   @assertFalse(stage%graph_valid)
 end subroutine test_stage_cache_invalidation
+
+subroutine riemann_test_case(case_index, gamma, left, right, normal)
+  use num_types, only : rp
+  implicit none
+
+  integer, intent(in) :: case_index
+  real(kind=rp), intent(out) :: gamma, left(5), right(5), normal(3)
+  real(kind=rp) :: inverse_sqrt_three
+
+  select case (case_index)
+  case (1)
+     gamma = 1.4_rp
+     normal = [1.0_rp, 0.0_rp, 0.0_rp]
+     left = make_state_3d(1.0_rp, [0.75_rp, 0.1_rp, -0.2_rp], &
+          1.0_rp, gamma)
+     right = make_state_3d(0.125_rp, [0.0_rp, -0.3_rp, 0.15_rp], &
+          0.1_rp, gamma)
+  case (2)
+     gamma = 1.4_rp
+     normal = [0.6_rp, 0.8_rp, 0.0_rp]
+     left = make_state_3d(1.0_rp, [0.0_rp, 0.0_rp, 0.2_rp], &
+          1000.0_rp, gamma)
+     right = make_state_3d(1.0_rp, [0.0_rp, 0.0_rp, -0.1_rp], &
+          0.01_rp, gamma)
+  case (3)
+     gamma = 5.0_rp / 3.0_rp
+     normal = [0.0_rp, 1.0_rp, 0.0_rp]
+     left = make_state_3d(1.0_rp, [0.2_rp, 3.0_rp, 0.0_rp], &
+          1.0_rp, gamma)
+     right = make_state_3d(0.8_rp, [-0.1_rp, -2.0_rp, 0.3_rp], &
+          0.5_rp, gamma)
+  case (4)
+     gamma = 5.0_rp / 3.0_rp
+     normal = [0.0_rp, 0.0_rp, 1.0_rp]
+     left = make_state_3d(0.7_rp, [0.4_rp, 0.0_rp, -1.0_rp], &
+          0.4_rp, gamma)
+     right = make_state_3d(1.3_rp, [-0.2_rp, 0.1_rp, 1.0_rp], &
+          0.9_rp, gamma)
+  case default
+     gamma = 1.1_rp
+     inverse_sqrt_three = 1.0_rp / sqrt(3.0_rp)
+     normal = inverse_sqrt_three * [1.0_rp, 1.0_rp, 1.0_rp]
+     left = make_state_3d(2.0_rp, 2.0_rp * normal + &
+          [0.2_rp, -0.2_rp, 0.0_rp], 3.0_rp, gamma)
+     right = make_state_3d(0.4_rp, -normal + &
+          [-0.1_rp, 0.1_rp, 0.0_rp], 0.2_rp, gamma)
+  end select
+end subroutine riemann_test_case
+
+pure function make_state_3d(rho, velocity, pressure, gamma) result(state)
+  use num_types, only : rp
+  implicit none
+
+  real(kind=rp), intent(in) :: rho, velocity(3), pressure, gamma
+  real(kind=rp) :: state(5)
+
+  state(1) = rho
+  state(2:4) = rho * velocity
+  state(5) = pressure / (gamma - 1.0_rp) + &
+       0.5_rp * rho * dot_product(velocity, velocity)
+end function make_state_3d
+
+pure function exact_riemann_maximum_speed(left, right, normal, gamma) &
+     result(speed)
+  use num_types, only : rp
+  use euler_idp_backend, only : euler_idp_internal_energy
+  implicit none
+
+  real(kind=rp), intent(in) :: left(5), right(5), normal(3), gamma
+  real(kind=rp) :: speed, pressure_left, pressure_right
+  real(kind=rp) :: sound_left, sound_right, velocity_left, velocity_right
+  real(kind=rp) :: pressure_lower, pressure_upper, pressure_star
+  real(kind=rp) :: phi, left_speed, right_speed, shock_factor
+  integer :: iteration
+
+  pressure_left = (gamma - 1.0_rp) * euler_idp_internal_energy(left)
+  pressure_right = (gamma - 1.0_rp) * euler_idp_internal_energy(right)
+  sound_left = sqrt(gamma * pressure_left / left(1))
+  sound_right = sqrt(gamma * pressure_right / right(1))
+  velocity_left = dot_product(left(2:4), normal) / left(1)
+  velocity_right = dot_product(right(2:4), normal) / right(1)
+
+  pressure_lower = 0.0_rp
+  pressure_upper = max(pressure_left, pressure_right)
+  do iteration = 1, 64
+     phi = riemann_pressure_function(pressure_upper, left(1), &
+          pressure_left, sound_left, gamma) + &
+          riemann_pressure_function(pressure_upper, right(1), &
+          pressure_right, sound_right, gamma) + &
+          velocity_right - velocity_left
+     if (phi .ge. 0.0_rp) exit
+     pressure_upper = 2.0_rp * pressure_upper
+  end do
+  do iteration = 1, 160
+     pressure_star = 0.5_rp * (pressure_lower + pressure_upper)
+     phi = riemann_pressure_function(pressure_star, left(1), &
+          pressure_left, sound_left, gamma) + &
+          riemann_pressure_function(pressure_star, right(1), &
+          pressure_right, sound_right, gamma) + &
+          velocity_right - velocity_left
+     if (phi .le. 0.0_rp) then
+        pressure_lower = pressure_star
+     else
+        pressure_upper = pressure_star
+     end if
+  end do
+  pressure_star = 0.5_rp * (pressure_lower + pressure_upper)
+
+  left_speed = velocity_left - sound_left
+  if (pressure_star .gt. pressure_left) then
+     shock_factor = sqrt(1.0_rp + (gamma + 1.0_rp) / &
+          (2.0_rp * gamma) * (pressure_star / pressure_left - 1.0_rp))
+     left_speed = velocity_left - sound_left * shock_factor
+  end if
+  right_speed = velocity_right + sound_right
+  if (pressure_star .gt. pressure_right) then
+     shock_factor = sqrt(1.0_rp + (gamma + 1.0_rp) / &
+          (2.0_rp * gamma) * (pressure_star / pressure_right - 1.0_rp))
+     right_speed = velocity_right + sound_right * shock_factor
+  end if
+  speed = max(0.0_rp, -left_speed, right_speed)
+end function exact_riemann_maximum_speed
+
+pure function riemann_pressure_function(pressure, density, state_pressure, &
+     sound_speed, gamma) result(value)
+  use num_types, only : rp
+  implicit none
+
+  real(kind=rp), intent(in) :: pressure, density, state_pressure
+  real(kind=rp), intent(in) :: sound_speed, gamma
+  real(kind=rp) :: value, coefficient_a, coefficient_b, exponent
+
+  if (pressure .gt. state_pressure) then
+     coefficient_a = 2.0_rp / ((gamma + 1.0_rp) * density)
+     coefficient_b = (gamma - 1.0_rp) / (gamma + 1.0_rp) * &
+          state_pressure
+     value = (pressure - state_pressure) * &
+          sqrt(coefficient_a / (pressure + coefficient_b))
+  else
+     exponent = (gamma - 1.0_rp) / (2.0_rp * gamma)
+     value = 2.0_rp * sound_speed / (gamma - 1.0_rp) * &
+          ((pressure / state_pressure)**exponent - 1.0_rp)
+  end if
+end function riemann_pressure_function
 
 pure function make_state(rho, velocity, pressure, gamma) result(state)
   use num_types, only : rp

@@ -293,6 +293,92 @@ contains
     call free_warped_hex_fixture(graph, coef, gs, dof, Xh, msh)
   end subroutine test_direct_correction_matches_convex_form
 
+  !> The CPU backend must apply the three SSPRK convex combinations to every
+  !! conserved component without altering the saved start-of-step state.
+  @test(npes=[1])
+  subroutine test_cpu_ssprk_state_composition(this)
+    use field, only : field_t
+    use euler_idp_backend, only : EULER_IDP_DIAGNOSTICS_OFF
+    use euler_idp_cpu, only : euler_idp_cpu_t
+    class(test_euler_gll_graph), intent(inout) :: this
+    type(mesh_t) :: msh
+    type(space_t) :: Xh
+    type(dofmap_t) :: dof
+    type(gs_t) :: gs
+    type(coef_t) :: coef
+    type(field_t) :: state(5)
+    type(euler_idp_cpu_t) :: backend
+    real(kind=rp) :: saved(5,lx_test,lx_test,lx_test,1)
+    real(kind=rp) :: candidate(5,lx_test,lx_test,lx_test,1)
+    real(kind=rp) :: expected(lx_test,lx_test,lx_test,1)
+    real(kind=rp) :: tolerance
+    character(len=24) :: name
+    integer :: component
+
+    call build_affine_hex_fixture(msh, Xh, dof, gs, coef)
+    do component = 1, 5
+       write(name, '(A,I0)') 'ssprk_state_', component
+       call state(component)%init(dof, trim(name))
+       saved(component,:,:,:,:) = real(component, rp) + &
+            0.1_rp * dof%x - 0.2_rp * dof%y + 0.3_rp * dof%z
+       state(component)%x = saved(component,:,:,:,:)
+    end do
+
+    call backend%init(dof)
+    call backend%init_graph(coef, gs, .false., .false., .true., .true., &
+         1.0_rp, 3, EULER_IDP_DIAGNOSTICS_OFF, 1.0e-10_rp)
+    call backend%save_state(state(1), state(2), state(3), state(4), &
+         state(5))
+    tolerance = 128.0_rp * epsilon(1.0_rp)
+
+    do component = 1, 5
+       candidate(component,:,:,:,:) = -real(component, rp) + &
+            0.4_rp * dof%x + 0.2_rp * dof%y - 0.1_rp * dof%z
+       backend%low_candidate(component)%x = candidate(component,:,:,:,:)
+    end do
+    call backend%combine_stage(state(1), state(2), state(3), state(4), &
+         state(5), 0.0_rp, 1.0_rp)
+    do component = 1, 5
+       @assertEqual(candidate(component,:,:,:,:), state(component)%x, tolerance=tolerance)
+    end do
+
+    do component = 1, 5
+       candidate(component,:,:,:,:) = 2.0_rp * real(component, rp) - &
+            0.3_rp * dof%x + 0.5_rp * dof%y + 0.2_rp * dof%z
+       backend%low_candidate(component)%x = candidate(component,:,:,:,:)
+    end do
+    call backend%combine_stage(state(1), state(2), state(3), state(4), &
+         state(5), 0.75_rp, 0.25_rp)
+    do component = 1, 5
+       expected = 0.75_rp * saved(component,:,:,:,:) + &
+            0.25_rp * candidate(component,:,:,:,:)
+       @assertEqual(expected, state(component)%x, tolerance=tolerance)
+    end do
+
+    do component = 1, 5
+       candidate(component,:,:,:,:) = -0.5_rp * real(component, rp) + &
+            0.7_rp * dof%x - 0.4_rp * dof%y + 0.6_rp * dof%z
+       backend%low_candidate(component)%x = candidate(component,:,:,:,:)
+    end do
+    call backend%combine_stage(state(1), state(2), state(3), state(4), &
+         state(5), 1.0_rp / 3.0_rp, 2.0_rp / 3.0_rp)
+    do component = 1, 5
+       expected = saved(component,:,:,:,:) / 3.0_rp + &
+            2.0_rp * candidate(component,:,:,:,:) / 3.0_rp
+       @assertEqual(expected, state(component)%x, tolerance=tolerance)
+    end do
+
+    call backend%free()
+    do component = 1, 5
+       call state(component)%free()
+    end do
+    call coef%free()
+    call gs%free()
+    call dof%free()
+    call Xh%free()
+    call msh%free()
+  end subroutine test_cpu_ssprk_state_composition
+
   !> Build one affine Cartesian hex.
   subroutine build_affine_hex_fixture(msh, Xh, dof, gs, coef)
     type(mesh_t), intent(inout) :: msh
