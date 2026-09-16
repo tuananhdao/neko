@@ -53,6 +53,9 @@ module euler_idp_device
   integer, parameter :: EULER_IDP_DEVICE_VALIDATION_SIZE = 9
   integer, parameter :: EULER_IDP_DEVICE_OBSERVATION_SIZE = 4
   integer, parameter :: EULER_IDP_DEVICE_LIMITER_STATUS_SIZE = 3
+  integer, parameter :: EULER_IDP_DEVICE_BLOCK_SIZE = 256
+  integer, parameter :: EULER_IDP_DEVICE_NODE_PARTIAL_SIZE = 8
+  integer, parameter :: EULER_IDP_DEVICE_EDGE_PARTIAL_SIZE = 10
 
   type, public, extends(euler_idp_backend_t) :: euler_idp_device_t
      logical :: periodic_graph = .false.
@@ -76,7 +79,7 @@ module euler_idp_device
      type(field_t) :: density_upper_bound
      type(field_t) :: entropy_lower_bound
      type(field_t) :: u, v, w, p, sound_speed, internal_energy
-     type(field_t) :: work_1, work_2, work_3
+     type(field_t) :: work_1, work_2
      integer, allocatable :: edge_left(:), edge_right(:), edge_direction(:)
      real(kind=rp), allocatable :: edge_coefficient(:,:)
      real(kind=rp), allocatable :: diagonal_coefficient(:,:)
@@ -89,6 +92,7 @@ module euler_idp_device
      real(kind=rp), allocatable :: edge_entropy_limited(:)
      real(kind=rp), allocatable :: directional_error(:)
      real(kind=rp), allocatable :: diagnostic_summary(:)
+     real(kind=rp), allocatable :: diagnostic_partial(:)
      type(c_ptr) :: edge_left_d = c_null_ptr
      type(c_ptr) :: edge_right_d = c_null_ptr
      type(c_ptr) :: edge_direction_d = c_null_ptr
@@ -103,6 +107,7 @@ module euler_idp_device
      type(c_ptr) :: edge_entropy_limited_d = c_null_ptr
      type(c_ptr) :: directional_error_d = c_null_ptr
      type(c_ptr) :: diagnostic_summary_d = c_null_ptr
+     type(c_ptr) :: diagnostic_partial_d = c_null_ptr
      integer :: global_node_count = 0
      integer :: global_edge_count = 0
    contains
@@ -152,7 +157,6 @@ contains
     call this%internal_energy%init(dof, 'euler_idp_device_internal_energy')
     call this%work_1%init(dof, 'euler_idp_device_work_1')
     call this%work_2%init(dof, 'euler_idp_device_work_2')
-    call this%work_3%init(dof, 'euler_idp_device_work_3')
     this%max_graph_rate = 0.0_rp
     this%max_graph_wave_speed = 0.0_rp
     this%maximum_graph_timestep = huge(1.0_rp)
@@ -174,6 +178,7 @@ contains
     real(kind=rp) :: local_mass, global_mass, local_error, global_error
     character(len=48) :: name
     integer :: a(4), b(4), component, direction, edge, ierr, n
+    integer :: diagnostic_partial_size
 
 #ifndef HAVE_CUDA
     call neko_error('Euler IDP device backend currently requires CUDA')
@@ -225,14 +230,24 @@ contains
     allocate(this%edge_viscosity(this%graph%n_edges))
     allocate(this%correction_flux(EULER_IDP_NCOMP, this%graph%n_edges))
     allocate(this%edge_work(this%graph%n_edges))
-    allocate(this%edge_limited(this%graph%n_edges))
-    allocate(this%edge_density_limited(this%graph%n_edges))
-    allocate(this%edge_energy_limited(this%graph%n_edges))
-    allocate(this%edge_entropy_limited(this%graph%n_edges))
     allocate(this%directional_error(EULER_IDP_NCOMP))
     if (diagnostics_level .ne. EULER_IDP_DIAGNOSTICS_OFF) then
        allocate(this%diagnostic_summary(EULER_IDP_DEVICE_DIAGNOSTICS_SIZE))
        this%diagnostic_summary = 0.0_rp
+    end if
+    if (diagnostics_level .eq. EULER_IDP_DIAGNOSTICS_FULL) then
+       allocate(this%edge_limited(this%graph%n_edges))
+       allocate(this%edge_density_limited(this%graph%n_edges))
+       allocate(this%edge_energy_limited(this%graph%n_edges))
+       allocate(this%edge_entropy_limited(this%graph%n_edges))
+       diagnostic_partial_size = EULER_IDP_DEVICE_NODE_PARTIAL_SIZE * &
+            ((n + EULER_IDP_DEVICE_BLOCK_SIZE - 1) / &
+            EULER_IDP_DEVICE_BLOCK_SIZE) + &
+            EULER_IDP_DEVICE_EDGE_PARTIAL_SIZE * &
+            ((this%graph%n_edges + EULER_IDP_DEVICE_BLOCK_SIZE - 1) / &
+            EULER_IDP_DEVICE_BLOCK_SIZE)
+       allocate(this%diagnostic_partial(diagnostic_partial_size))
+       this%diagnostic_partial = 0.0_rp
     end if
     do edge = 1, this%graph%n_edges
        a = this%graph%left(:,edge)
@@ -249,10 +264,16 @@ contains
     this%edge_viscosity = 0.0_rp
     this%correction_flux = 0.0_rp
     this%edge_work = 0.0_rp
-    this%edge_limited = 0.0_rp
-    this%edge_density_limited = 0.0_rp
-    this%edge_energy_limited = 0.0_rp
-    this%edge_entropy_limited = 0.0_rp
+    if (allocated(this%edge_limited)) this%edge_limited = 0.0_rp
+    if (allocated(this%edge_density_limited)) then
+       this%edge_density_limited = 0.0_rp
+    end if
+    if (allocated(this%edge_energy_limited)) then
+       this%edge_energy_limited = 0.0_rp
+    end if
+    if (allocated(this%edge_entropy_limited)) then
+       this%edge_entropy_limited = 0.0_rp
+    end if
     this%directional_error = 0.0_rp
     this%global_node_count = n
     this%global_edge_count = this%graph%n_edges
@@ -314,18 +335,24 @@ contains
     call device_map(this%correction_flux, this%correction_flux_d, &
          EULER_IDP_NCOMP * n_edges)
     call device_map(this%edge_work, this%edge_work_d, n_edges)
-    call device_map(this%edge_limited, this%edge_limited_d, n_edges)
-    call device_map(this%edge_density_limited, &
-         this%edge_density_limited_d, n_edges)
-    call device_map(this%edge_energy_limited, &
-         this%edge_energy_limited_d, n_edges)
-    call device_map(this%edge_entropy_limited, &
-         this%edge_entropy_limited_d, n_edges)
+    if (allocated(this%edge_limited)) then
+       call device_map(this%edge_limited, this%edge_limited_d, n_edges)
+       call device_map(this%edge_density_limited, &
+            this%edge_density_limited_d, n_edges)
+       call device_map(this%edge_energy_limited, &
+            this%edge_energy_limited_d, n_edges)
+       call device_map(this%edge_entropy_limited, &
+            this%edge_entropy_limited_d, n_edges)
+    end if
     call device_map(this%directional_error, this%directional_error_d, &
          EULER_IDP_NCOMP)
     if (allocated(this%diagnostic_summary)) then
        call device_map(this%diagnostic_summary, this%diagnostic_summary_d, &
             EULER_IDP_DEVICE_DIAGNOSTICS_SIZE)
+    end if
+    if (allocated(this%diagnostic_partial)) then
+       call device_map(this%diagnostic_partial, this%diagnostic_partial_d, &
+            size(this%diagnostic_partial))
     end if
     call device_memcpy(this%edge_left, this%edge_left_d, n_edges, &
          HOST_TO_DEVICE, sync = .false.)
@@ -357,7 +384,7 @@ contains
     call this%u%free(); call this%v%free(); call this%w%free()
     call this%p%free(); call this%sound_speed%free()
     call this%internal_energy%free()
-    call this%work_1%free(); call this%work_2%free(); call this%work_3%free()
+    call this%work_1%free(); call this%work_2%free()
     this%initialized = .false.
     this%periodic_graph = .false.
     this%low_order_only = .false.
@@ -442,6 +469,11 @@ contains
        call device_unmap(this%diagnostic_summary, &
             this%diagnostic_summary_d)
        deallocate(this%diagnostic_summary)
+    end if
+    if (allocated(this%diagnostic_partial)) then
+       call device_unmap(this%diagnostic_partial, &
+            this%diagnostic_partial_d)
+       deallocate(this%diagnostic_partial)
     end if
   end subroutine euler_idp_device_unmap_graph
 
@@ -548,7 +580,7 @@ contains
     type(c_ptr) :: entropy_fraction_d
     real(kind=rp) :: maximum_floor_timestep
     character(len=2 * LOG_SIZE) :: message
-    integer :: affine, check_base, component, enforce_energy, enforce_entropy
+    integer :: affine, check_base, enforce_energy, enforce_entropy
     integer :: has_entropy, low_only, n, n_edges, periodic, scalar_mode
 
 #ifndef HAVE_CUDA
@@ -571,9 +603,10 @@ contains
          this%low_candidate(2)%x_d, this%low_candidate(3)%x_d, &
          this%low_candidate(4)%x_d, this%low_candidate(5)%x_d, gamma, &
          periodic, n, n_edges)
-    do component = 1, EULER_IDP_NCOMP
-       call gs%op(this%low_candidate(component), GS_OP_ADD)
-    end do
+    call gs%op(this%low_candidate(1), GS_OP_ADD)
+    call gs%op(this%low_candidate(2)%x, this%low_candidate(3)%x, &
+         this%low_candidate(4)%x, n, GS_OP_ADD)
+    call gs%op(this%low_candidate(5), GS_OP_ADD)
     call cuda_euler_idp_scale_residual(this%low_candidate(1)%x_d, &
          this%low_candidate(2)%x_d, this%low_candidate(3)%x_d, &
          this%low_candidate(4)%x_d, this%low_candidate(5)%x_d, &
@@ -676,6 +709,7 @@ contains
          this%edge_density_limited_d, this%edge_energy_limited_d, &
          this%edge_entropy_limited_d, gamma, internal_energy_floor, &
          enforce_energy, enforce_entropy, check_base, &
+         this%diagnostics_level, &
          this%graph%n_directions, n_edges)
 
     diagnostics%limiter_weight_error = this%limiter_weight_error
@@ -694,9 +728,10 @@ contains
        call euler_idp_device_collect_full_diagnostics(this, rho, m_x, m_y, &
             m_z, energy, gamma, entropy_fraction_d, has_entropy, diagnostics)
     end if
-    do component = 1, EULER_IDP_NCOMP
-       call gs%op(this%local_residual(component), GS_OP_ADD)
-    end do
+    call gs%op(this%local_residual(1), GS_OP_ADD)
+    call gs%op(this%local_residual(2)%x, this%local_residual(3)%x, &
+         this%local_residual(4)%x, n, GS_OP_ADD)
+    call gs%op(this%local_residual(5), GS_OP_ADD)
     call cuda_euler_idp_correction_update(this%low_candidate(1)%x_d, &
          this%low_candidate(2)%x_d, this%low_candidate(3)%x_d, &
          this%low_candidate(4)%x_d, this%low_candidate(5)%x_d, &
@@ -732,7 +767,7 @@ contains
          this%local_residual(1)%x_d, this%local_residual(2)%x_d, &
          this%local_residual(3)%x_d, this%local_residual(4)%x_d, &
          this%local_residual(5)%x_d, this%directional_error_d, &
-         this%diagnostic_summary_d, n, n_edges)
+         this%diagnostic_summary_d, this%diagnostic_partial_d, n, n_edges)
     call device_memcpy(this%diagnostic_summary, &
          this%diagnostic_summary_d, EULER_IDP_DEVICE_DIAGNOSTICS_SIZE, &
          DEVICE_TO_HOST, sync = .true.)

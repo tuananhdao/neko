@@ -733,7 +733,7 @@ __global__ void limiter_kernel(const T *q0,const T *q1,const T *q2,
   const int *left,const int *right,const int *direction,T *correction,
   T *edge_limit,T *limited,T *density_flag,T *energy_flag,T *entropy_flag,
   T gamma,T floor,int enforce_energy,int enforce_entropy,int check_base,
-  int dimensions,int nedge){const T *q[5]={q0,q1,q2,q3,q4};const T *degree[3]={degree0,degree1,degree2};
+  int diagnostics_level,int dimensions,int nedge){const T *q[5]={q0,q1,q2,q3,q4};const T *degree[3]={degree0,degree1,degree2};
   const T eps=real_epsilon<T>();
   for(int e=blockIdx.x*blockDim.x+threadIdx.x;e<nedge;e+=blockDim.x*gridDim.x){const int a=left[e],b=right[e],d=direction[e]-1;
     T lb[5],rb[5],lc[5],rc[5];T scale=T(1),size=T(0);for(int c=0;c<5;++c){lb[c]=q[c][a];rb[c]=q[c][b];
@@ -751,8 +751,10 @@ __global__ void limiter_kernel(const T *q0,const T *q1,const T *q2,
           T lo=T(0),hi=limit;for(int it=0;it<64;++it){const T mid=lo+T(0.5)*(hi-lo);for(int c=0;c<5;++c){lt[c]=lb[c]+mid*lc[c];rt[c]=rb[c]+mid*rc[c];}
             if(entropy_is_admissible(lt,gamma,sent,floor)&&entropy_is_admissible(rt,gamma,tent,floor))lo=mid;else hi=mid;}limit=lo;sl=true;}}
       for(int c=0;c<5;++c)correction[5*e+c]*=limit;}
-    edge_limit[e]=limit;limited[e]=limit<T(1)-T(32)*eps?T(1):T(0);density_flag[e]=dl?T(1):T(0);
-    energy_flag[e]=el?T(1):T(0);entropy_flag[e]=sl?T(1):T(0);}
+    if(diagnostics_level>0)edge_limit[e]=limit;
+    if(diagnostics_level>1){limited[e]=limit<T(1)-T(32)*eps?T(1):T(0);
+      density_flag[e]=dl?T(1):T(0);energy_flag[e]=el?T(1):T(0);
+      entropy_flag[e]=sl?T(1):T(0);}}
 }
 
 template<typename T>
@@ -799,54 +801,142 @@ __global__ void diagnostic_summary_init_kernel(T *summary, int size,
   }
 }
 
+enum full_diagnostic_partial_size {
+  full_node_partial_size = 8,
+  full_edge_partial_size = 10
+};
+
 template<typename T>
-__global__ void full_diagnostics_kernel(const T *rho, const T *mx,
-  const T *my, const T *mz, const T *energy, T gamma,
-  const T *entropy_fraction, int has_entropy,
-  const T *edge_limit, const T *limited, const T *density_flag,
-  const T *energy_flag, const T *entropy_flag, const T *correction,
-  const T *r0, const T *r1, const T *r2, const T *r3, const T *r4,
-  const T *directional_error, T *summary, int n, int nedge) {
+__global__ void full_diagnostics_node_partial_kernel(const T *rho,
+  const T *mx, const T *my, const T *mz, const T *energy, T gamma,
+  const T *entropy_fraction, int has_entropy, const T *r0, const T *r1,
+  const T *r2, const T *r3, const T *r4, T *partial, int n) {
+  extern __shared__ unsigned char storage[];
+  T *shared = reinterpret_cast<T *>(storage);
   const T *residual[5] = {r0, r1, r2, r3, r4};
-  const T eps = real_epsilon<T>();
-  const int count = n > nedge ? n : nedge;
-  for (int i = blockIdx.x * blockDim.x + threadIdx.x; i < count;
-       i += blockDim.x * gridDim.x) {
-    if (i < n) {
-      T state[5];
-      load_state(rho, mx, my, mz, energy, i, state);
-      const T pressure = (gamma - T(1)) * internal_energy(state);
-      const T velocity = sqrt(mx[i]*mx[i] + my[i]*my[i] + mz[i]*mz[i]) /
-        rho[i];
-      const T wave = velocity + sqrt(gamma * pressure / rho[i]);
-      atomic_max_real(summary, wave);
-      if (has_entropy) {
-        atomic_max_real(summary + 1, entropy_fraction[i]);
-        atomicAdd(summary + 2, entropy_fraction[i]);
-      }
-      for (int c = 0; c < 5; ++c)
-        atomicAdd(summary + 10 + c, residual[c][i]);
+  const int tid = threadIdx.x;
+  const int i = blockIdx.x * blockDim.x + tid;
+  T value[full_node_partial_size] = {T(0), T(0), T(0), T(0),
+                                     T(0), T(0), T(0), T(0)};
+  if (i < n) {
+    T state[5];
+    load_state(rho, mx, my, mz, energy, i, state);
+    const T pressure = (gamma - T(1)) * internal_energy(state);
+    const T velocity = sqrt(mx[i]*mx[i] + my[i]*my[i] + mz[i]*mz[i]) /
+      rho[i];
+    value[0] = velocity + sqrt(gamma * pressure / rho[i]);
+    if (has_entropy) {
+      value[1] = entropy_fraction[i];
+      value[2] = entropy_fraction[i];
     }
-    if (i < nedge) {
-      const T limit = edge_limit[i];
-      atomic_min_real(summary + 3, limit);
-      atomic_max_real(summary + 4, limit);
-      atomicAdd(summary + 5, limit);
-      atomicAdd(summary + 6, limited[i]);
-      atomicAdd(summary + 7, density_flag[i]);
-      atomicAdd(summary + 8, energy_flag[i]);
-      atomicAdd(summary + 9, entropy_flag[i]);
-      if (!isfinite(limit) || limit < -T(32)*eps ||
-          limit > T(1) + T(32)*eps)
-        atomicAdd(summary + 22, T(1));
-      for (int c = 0; c < 5; ++c) {
-        const T value = correction[5*i+c];
-        atomic_max_real(summary + 20, fabs(value));
-        atomicAdd(summary + 21, value*value);
-      }
-    }
-    if (i < 5) summary[15+i] = directional_error[i];
+    for (int c = 0; c < 5; ++c) value[3+c] = residual[c][i];
   }
+  for (int metric = 0; metric < full_node_partial_size; ++metric)
+    shared[metric*blockDim.x+tid] = value[metric];
+  __syncthreads();
+  for (int stride = blockDim.x / 2; stride > 0; stride /= 2) {
+    if (tid < stride) {
+      shared[tid] = rmax(shared[tid], shared[tid+stride]);
+      shared[blockDim.x+tid] = rmax(shared[blockDim.x+tid],
+                                    shared[blockDim.x+tid+stride]);
+      for (int metric = 2; metric < full_node_partial_size; ++metric)
+        shared[metric*blockDim.x+tid] +=
+          shared[metric*blockDim.x+tid+stride];
+    }
+    __syncthreads();
+  }
+  if (tid < full_node_partial_size)
+    partial[blockIdx.x*full_node_partial_size+tid] =
+      shared[tid*blockDim.x];
+}
+
+template<typename T>
+__global__ void full_diagnostics_edge_partial_kernel(const T *edge_limit,
+  const T *limited, const T *density_flag, const T *energy_flag,
+  const T *entropy_flag, const T *correction, T *partial, int nedge) {
+  extern __shared__ unsigned char storage[];
+  T *shared = reinterpret_cast<T *>(storage);
+  const int tid = threadIdx.x;
+  const int i = blockIdx.x * blockDim.x + tid;
+  const T huge = real_huge<T>();
+  const T eps = real_epsilon<T>();
+  T value[full_edge_partial_size] = {huge, -huge, T(0), T(0), T(0),
+                                     T(0), T(0), T(0), T(0), T(0)};
+  if (i < nedge) {
+    const T limit = edge_limit[i];
+    value[0] = limit;
+    value[1] = limit;
+    value[2] = limit;
+    value[3] = limited[i];
+    value[4] = density_flag[i];
+    value[5] = energy_flag[i];
+    value[6] = entropy_flag[i];
+    value[7] = (!isfinite(limit) || limit < -T(32)*eps ||
+                limit > T(1) + T(32)*eps) ? T(1) : T(0);
+    for (int c = 0; c < 5; ++c) {
+      const T flux = correction[5*i+c];
+      value[8] = rmax(value[8], fabs(flux));
+      value[9] += flux*flux;
+    }
+  }
+  for (int metric = 0; metric < full_edge_partial_size; ++metric)
+    shared[metric*blockDim.x+tid] = value[metric];
+  __syncthreads();
+  for (int stride = blockDim.x / 2; stride > 0; stride /= 2) {
+    if (tid < stride) {
+      shared[tid] = rmin(shared[tid], shared[tid+stride]);
+      shared[blockDim.x+tid] = rmax(shared[blockDim.x+tid],
+                                    shared[blockDim.x+tid+stride]);
+      for (int metric = 2; metric < 8; ++metric)
+        shared[metric*blockDim.x+tid] +=
+          shared[metric*blockDim.x+tid+stride];
+      shared[8*blockDim.x+tid] = rmax(shared[8*blockDim.x+tid],
+                                      shared[8*blockDim.x+tid+stride]);
+      shared[9*blockDim.x+tid] += shared[9*blockDim.x+tid+stride];
+    }
+    __syncthreads();
+  }
+  if (tid < full_edge_partial_size)
+    partial[blockIdx.x*full_edge_partial_size+tid] =
+      shared[tid*blockDim.x];
+}
+
+template<typename T>
+__global__ void full_diagnostics_finalize_kernel(const T *node_partial,
+  const T *edge_partial, const T *directional_error, T *summary,
+  int node_blocks, int edge_blocks) {
+  const int metric = threadIdx.x;
+  if (blockIdx.x != 0 || metric >= 23) return;
+  T result = T(0);
+  if (metric == 0 || metric == 1) {
+    for (int block = 0; block < node_blocks; ++block)
+      result = rmax(result,
+        node_partial[block*full_node_partial_size+metric]);
+  } else if (metric == 2) {
+    for (int block = 0; block < node_blocks; ++block)
+      result += node_partial[block*full_node_partial_size+2];
+  } else if (metric >= 10 && metric < 15) {
+    const int source = metric - 7;
+    for (int block = 0; block < node_blocks; ++block)
+      result += node_partial[block*full_node_partial_size+source];
+  } else if (metric >= 15 && metric < 20) {
+    result = directional_error[metric-15];
+  } else {
+    int source = -1;
+    if (metric >= 3 && metric <= 9) source = metric - 3;
+    else if (metric == 20) source = 8;
+    else if (metric == 21) source = 9;
+    else if (metric == 22) source = 7;
+    if (metric == 3) result = real_huge<T>();
+    else if (metric == 4) result = -real_huge<T>();
+    for (int block = 0; block < edge_blocks; ++block) {
+      const T value = edge_partial[block*full_edge_partial_size+source];
+      if (metric == 3) result = rmin(result, value);
+      else if (metric == 4 || metric == 20) result = rmax(result, value);
+      else result += value;
+    }
+  }
+  summary[metric] = result;
 }
 
 template<typename T>
@@ -996,7 +1086,8 @@ void cuda_euler_idp_limiter(void *q0,void *q1,void *q2,void *q3,void *q4,
   void *degree2,void *left,void *right,void *direction,void *correction,
   void *edge_limit,void *limited,void *density_flag,void *energy_flag,
   void *entropy_flag,real *gamma,real *floor,int *enforce_energy,
-  int *enforce_entropy,int *check_base,int *dimensions,int *nedge){cudaStream_t s=(cudaStream_t)glb_cmd_queue;limiter_kernel<real><<<blocks(*nedge),threads(),0,s>>>((real*)q0,(real*)q1,(real*)q2,(real*)q3,(real*)q4,(real*)lower,(real*)upper,(real*)entropy,(real*)mass,(real*)degree0,(real*)degree1,(real*)degree2,(int*)left,(int*)right,(int*)direction,(real*)correction,(real*)edge_limit,(real*)limited,(real*)density_flag,(real*)energy_flag,(real*)entropy_flag,*gamma,*floor,*enforce_energy,*enforce_entropy,*check_base,*dimensions,*nedge);CUDA_CHECK(cudaGetLastError());}
+  int *enforce_entropy,int *check_base,int *diagnostics_level,int *dimensions,
+  int *nedge){cudaStream_t s=(cudaStream_t)glb_cmd_queue;limiter_kernel<real><<<blocks(*nedge),threads(),0,s>>>((real*)q0,(real*)q1,(real*)q2,(real*)q3,(real*)q4,(real*)lower,(real*)upper,(real*)entropy,(real*)mass,(real*)degree0,(real*)degree1,(real*)degree2,(int*)left,(int*)right,(int*)direction,(real*)correction,(real*)edge_limit,(real*)limited,(real*)density_flag,(real*)energy_flag,(real*)entropy_flag,*gamma,*floor,*enforce_energy,*enforce_entropy,*check_base,*diagnostics_level,*dimensions,*nedge);CUDA_CHECK(cudaGetLastError());}
 void cuda_euler_idp_incidence(void *left,void *right,void *correction,void *q0,
   void *q1,void *q2,void *q3,void *q4,void *r0,void *r1,void *r2,void *r3,
   void *r4,int *n,int *nedge){cudaStream_t s=(cudaStream_t)glb_cmd_queue;void *r[5]={r0,r1,r2,r3,r4};for(int c=0;c<5;++c)CUDA_CHECK(cudaMemsetAsync(r[c],0,sizeof(real)*(*n),s));incidence_kernel<real><<<blocks(*nedge),threads(),0,s>>>((int*)left,(int*)right,(real*)correction,(real*)r0,(real*)r1,(real*)r2,(real*)r3,(real*)r4,*nedge);CUDA_CHECK(cudaGetLastError());}
@@ -1012,15 +1103,24 @@ void cuda_euler_idp_full_diagnostics(void *rho,void *mx,void *my,void *mz,
   void *edge_limit,void *limited,
   void *density_flag,void *energy_flag,void *entropy_flag,void *correction,
   void *r0,void *r1,void *r2,void *r3,void *r4,void *directional_error,
-  void *summary,int *n,int *nedge){cudaStream_t s=(cudaStream_t)glb_cmd_queue;
-  diagnostic_summary_init_kernel<real><<<1,1,0,s>>>((real*)summary,23,full_summary);
-  int count=*n>*nedge?*n:*nedge;if(count<5)count=5;
-  full_diagnostics_kernel<real><<<blocks(count),threads(),0,s>>>((real*)rho,
-    (real*)mx,(real*)my,(real*)mz,(real*)energy,*gamma,
-    (real*)entropy_fraction,*has_entropy,
-    (real*)edge_limit,(real*)limited,(real*)density_flag,(real*)energy_flag,
-    (real*)entropy_flag,(real*)correction,(real*)r0,(real*)r1,(real*)r2,
-    (real*)r3,(real*)r4,(real*)directional_error,(real*)summary,*n,*nedge);
+  void *summary,void *partial,int *n,int *nedge){
+  cudaStream_t s=(cudaStream_t)glb_cmd_queue;
+  const int node_blocks=blocks(*n).x,edge_blocks=blocks(*nedge).x;
+  real *node_partial=(real*)partial;
+  real *edge_partial=node_partial+full_node_partial_size*node_blocks;
+  const size_t node_shared=sizeof(real)*full_node_partial_size*threads().x;
+  const size_t edge_shared=sizeof(real)*full_edge_partial_size*threads().x;
+  full_diagnostics_node_partial_kernel<real><<<node_blocks,threads(),
+    node_shared,s>>>((real*)rho,(real*)mx,(real*)my,(real*)mz,(real*)energy,
+    *gamma,(real*)entropy_fraction,*has_entropy,(real*)r0,(real*)r1,
+    (real*)r2,(real*)r3,(real*)r4,node_partial,*n);
+  full_diagnostics_edge_partial_kernel<real><<<edge_blocks,threads(),
+    edge_shared,s>>>((real*)edge_limit,(real*)limited,(real*)density_flag,
+    (real*)energy_flag,(real*)entropy_flag,(real*)correction,edge_partial,
+    *nedge);
+  full_diagnostics_finalize_kernel<real><<<1,32,0,s>>>(node_partial,
+    edge_partial,(real*)directional_error,(real*)summary,node_blocks,
+    edge_blocks);
   CUDA_CHECK(cudaGetLastError());}
 
 void cuda_euler_idp_validation_summary(void *q0,void *q1,void *q2,void *q3,

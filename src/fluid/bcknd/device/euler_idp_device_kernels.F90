@@ -189,7 +189,7 @@ module euler_idp_device_kernels
           entropy, mass, degree0, degree1, degree2, left, right, direction, &
           correction, edge_limit, limited, density_flag, energy_flag, &
           entropy_flag, gamma, floor, enforce_energy, enforce_entropy, &
-          check_base, dimensions, n_edges) bind(c, name = &
+          check_base, diagnostics_level, dimensions, n_edges) bind(c, name = &
           'cuda_euler_idp_limiter')
        import c_ptr, c_int, c_rp
        type(c_ptr), value :: q0, q1, q2, q3, q4, lower, upper, entropy, mass
@@ -198,7 +198,7 @@ module euler_idp_device_kernels
        type(c_ptr), value :: density_flag, energy_flag, entropy_flag
        real(c_rp) :: gamma, floor
        integer(c_int) :: enforce_energy, enforce_entropy, check_base
-       integer(c_int) :: dimensions, n_edges
+       integer(c_int) :: diagnostics_level, dimensions, n_edges
      end subroutine cuda_euler_idp_limiter
 
      subroutine cuda_euler_idp_incidence(left, right, correction, q0, q1, &
@@ -233,14 +233,14 @@ module euler_idp_device_kernels
      subroutine cuda_euler_idp_full_diagnostics(rho, mx, my, mz, energy, &
           gamma, entropy_fraction, has_entropy, edge_limit, limited, &
           density_flag, energy_flag, entropy_flag, correction, r0, r1, r2, &
-          r3, r4, directional_error, summary, n, n_edges) bind(c, name = &
-          'cuda_euler_idp_full_diagnostics')
+          r3, r4, directional_error, summary, partial, n, n_edges) &
+          bind(c, name = 'cuda_euler_idp_full_diagnostics')
        import c_ptr, c_int, c_rp
        type(c_ptr), value :: rho, mx, my, mz, energy, entropy_fraction
        type(c_ptr), value :: edge_limit, limited, density_flag, energy_flag
        type(c_ptr), value :: entropy_flag, correction
        type(c_ptr), value :: r0, r1, r2, r3, r4
-       type(c_ptr), value :: directional_error, summary
+       type(c_ptr), value :: directional_error, summary, partial
        real(c_rp) :: gamma
        integer(c_int) :: has_entropy, n, n_edges
      end subroutine cuda_euler_idp_full_diagnostics
