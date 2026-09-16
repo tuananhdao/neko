@@ -50,14 +50,15 @@ module fluid_scheme_compressible
   use json_utils, only : json_get_or_default, json_get_or_lookup_or_default
   use mpi_f08
   use operators, only : cfl_compressible
-  use device, only : device_memcpy, HOST_TO_DEVICE
+  use device, only : device_memcpy, HOST_TO_DEVICE, DEVICE_TO_HOST
   use compressible_ops_cpu, only : &
        compressible_ops_cpu_compute_max_wave_speed, &
        compressible_ops_cpu_compute_entropy, &
        compressible_ops_cpu_conserved_to_primitive, EULER_STATE_OK
   use compressible_ops_device, only : &
        compressible_ops_device_compute_max_wave_speed, &
-       compressible_ops_device_compute_entropy
+       compressible_ops_device_compute_entropy, &
+       compressible_ops_device_update_temperature
   use neko_config, only : NEKO_BCKND_DEVICE, NEKO_BCKND_SX
   use time_state, only : time_state_t
   use logger, only : neko_log, LOG_SIZE
@@ -360,7 +361,7 @@ contains
     integer, allocatable :: state_status(:)
     real(kind=rp), allocatable :: rho_primitive(:), sound_speed(:)
     real(kind=rp), allocatable :: internal_energy(:)
-    character(len=LOG_SIZE) :: log_buf
+    character(len=2 * LOG_SIZE) :: log_buf
 
     n = this%dm_Xh%size()
     call neko_scratch_registry%request_field(temp, temp_indices(1), .false.)
@@ -401,14 +402,27 @@ contains
     call field_add2(this%E, temp, n)
 
     !> Initialize temperature T = p / (rho * (gamma - 1))
-    do i = 1, n
-       this%temperature%x(i,1,1,1) = this%p%x(i,1,1,1) / &
-            (this%rho%x(i,1,1,1) * (this%gamma - 1.0_rp))
-    end do
+    if (NEKO_BCKND_DEVICE .eq. 1) then
+       call compressible_ops_device_update_temperature( &
+            this%temperature%x_d, this%p%x_d, this%rho%x_d, &
+            this%gamma, n)
+    else
+       do i = 1, n
+          this%temperature%x(i,1,1,1) = this%p%x(i,1,1,1) / &
+               (this%rho%x(i,1,1,1) * (this%gamma - 1.0_rp))
+       end do
+    end if
 
     call neko_scratch_registry%relinquish_field(temp_indices)
 
     if (this%euler_idp%enabled) then
+       if (NEKO_BCKND_DEVICE .eq. 1) then
+          call this%rho%copy_from(DEVICE_TO_HOST, sync = .false.)
+          call this%m_x%copy_from(DEVICE_TO_HOST, sync = .false.)
+          call this%m_y%copy_from(DEVICE_TO_HOST, sync = .false.)
+          call this%m_z%copy_from(DEVICE_TO_HOST, sync = .false.)
+          call this%E%copy_from(DEVICE_TO_HOST, sync = .true.)
+       end if
        allocate(rho_primitive(n), sound_speed(n), internal_energy(n))
        allocate(state_status(n))
        call compressible_ops_cpu_conserved_to_primitive(this%rho%x, &
