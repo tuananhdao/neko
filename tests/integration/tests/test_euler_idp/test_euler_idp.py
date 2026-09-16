@@ -205,9 +205,12 @@ def _parse_summary(log_path):
         "EULER_IDP_ERROR": None,
         "EULER_IDP_DRIFT": None,
         "EULER_IDP_LIMITER": None,
+        "EULER_IDP_LIMITER_STATS": None,
+        "EULER_IDP_LIMITER_COUNTS": None,
         "EULER_IDP_STATE": None,
         "EULER_IDP_BOUNDS": None,
         "EULER_IDP_CONSERVATION": None,
+        "EULER_IDP_CORRECTION": None,
         "EULER_IDP_BOUNDARY": None,
     }
     for line in log_path.read_text(errors="replace").splitlines():
@@ -230,11 +233,18 @@ def _parse_summary(log_path):
         "errors": np.asarray(tags["EULER_IDP_ERROR"], dtype=float),
         "drifts": np.asarray(tags["EULER_IDP_DRIFT"], dtype=float),
         "limiter": np.asarray(tags["EULER_IDP_LIMITER"], dtype=float),
+        "limiter_stats": np.asarray(
+            tags["EULER_IDP_LIMITER_STATS"], dtype=float
+        ),
+        "limiter_counts": np.asarray(
+            tags["EULER_IDP_LIMITER_COUNTS"], dtype=int
+        ),
         "state": np.asarray(tags["EULER_IDP_STATE"], dtype=float),
         "bounds": np.asarray(tags["EULER_IDP_BOUNDS"], dtype=float),
         "stage_conservation": np.asarray(
             tags["EULER_IDP_CONSERVATION"], dtype=float
         ),
+        "correction": np.asarray(tags["EULER_IDP_CORRECTION"], dtype=float),
         "boundary": np.asarray(tags["EULER_IDP_BOUNDARY"], dtype=float),
     }
     return summary
@@ -306,12 +316,24 @@ def _run_case(
         "errors",
         "drifts",
         "limiter",
+        "limiter_stats",
         "state",
         "bounds",
         "stage_conservation",
+        "correction",
         "boundary",
     ):
         assert np.all(np.isfinite(summary[key])), f"non-finite {key}: {summary[key]}"
+    assert np.all(summary["limiter_counts"] >= 0)
+    limiter_min, limiter_mean, limiter_max, limited_fraction = (
+        summary["limiter_stats"]
+    )
+    tolerance = _tolerances()["roundoff"]
+    assert -tolerance <= limiter_min <= limiter_mean + tolerance
+    assert limiter_mean <= limiter_max + tolerance
+    assert limiter_max <= 1.0 + tolerance
+    assert -tolerance <= limited_fraction <= 1.0 + tolerance
+    assert np.max(summary["correction"]) <= _tolerances()["correction"]
     return summary
 
 
@@ -353,16 +375,22 @@ def _tolerances():
         return {
             "roundoff": 3.0e-5,
             "conservation": 3.0e-5,
+            "correction": 3.0e-5,
             "bounds": 3.0e-5,
             "rank_rtol": 8.0e-5,
             "rank_atol": 8.0e-6,
+            "stat_rtol": 2.0e-4,
+            "stat_atol": 2.0e-5,
         }
     return {
         "roundoff": 2.0e-12,
         "conservation": 2.0e-12,
+        "correction": 2.0e-11,
         "bounds": 2.0e-12,
         "rank_rtol": 2.0e-11,
         "rank_atol": 2.0e-12,
+        "stat_rtol": 2.0e-8,
+        "stat_atol": 2.0e-10,
     }
 
 
@@ -471,16 +499,31 @@ def test_idp_near_vacuum_evolution(
     diagnostic_keys = (
         "drifts",
         "limiter",
+        "limiter_stats",
+        "limiter_counts",
         "state",
         "bounds",
         "stage_conservation",
+        "correction",
     )
     for key in diagnostic_keys:
+        if key == "limiter_counts":
+            np.testing.assert_array_equal(
+                runs[0][key],
+                runs[1][key],
+                err_msg="1-rank and 2-rank limiter counts differ",
+            )
+            continue
+        relative_tolerance = tolerance["rank_rtol"]
+        absolute_tolerance = tolerance["rank_atol"]
+        if key == "limiter_stats":
+            relative_tolerance = tolerance["stat_rtol"]
+            absolute_tolerance = tolerance["stat_atol"]
         np.testing.assert_allclose(
             runs[0][key],
             runs[1][key],
-            rtol=tolerance["rank_rtol"],
-            atol=tolerance["rank_atol"],
+            rtol=relative_tolerance,
+            atol=absolute_tolerance,
             err_msg=f"1-rank and 2-rank {key} diagnostics differ",
         )
 

@@ -694,6 +694,14 @@ contains
          this%local_residual(1)%x_d, this%local_residual(2)%x_d, &
          this%local_residual(3)%x_d, this%local_residual(4)%x_d, &
          this%local_residual(5)%x_d, n, n_edges)
+    if (this%diagnostics_level .eq. EULER_IDP_DIAGNOSTICS_FULL) then
+       do component = 1, EULER_IDP_NCOMP
+          global_error(component) = abs(device_glsum( &
+               this%local_residual(component)%x_d, n))
+       end do
+       diagnostics%limited_conservation = global_error
+       diagnostics%correction_global_compatibility = global_error
+    end if
     do component = 1, EULER_IDP_NCOMP
        call gs%op(this%local_residual(component), GS_OP_ADD)
     end do

@@ -1093,7 +1093,7 @@ contains
             'low-order candidate before correction')
     end if
     call this%compute_limiter(gamma, internal_energy_floor, diagnostics)
-    call this%apply_correction(gs)
+    call this%apply_correction(gs, diagnostics)
     call profiler_end_region('Euler IDP Forward Euler')
   end subroutine euler_idp_cpu_forward_euler
 
@@ -1113,6 +1113,8 @@ contains
     real(kind=rp) :: edge_limit
     real(kind=rp) :: correction_scale, correction_size
     real(kind=rp) :: local_minimum, global_minimum
+    real(kind=rp) :: local_maximum, global_maximum
+    real(kind=rp) :: local_sum, global_sum
     integer :: local_count(5), global_count(5)
     integer :: direction, edge, component, ierr
     logical :: density_limited, energy_limited, entropy_limited
@@ -1122,6 +1124,8 @@ contains
 
     call profiler_start_region('Euler IDP vector limiter')
     local_minimum = 1.0_rp
+    local_maximum = 0.0_rp
+    local_sum = 0.0_rp
     local_count = 0
     check_base_constraints = &
          this%diagnostics_level .ne. EULER_IDP_DIAGNOSTICS_OFF
@@ -1212,6 +1216,8 @@ contains
        end if
        if (this%diagnostics_level .eq. EULER_IDP_DIAGNOSTICS_FULL) then
           local_minimum = min(local_minimum, edge_limit)
+          local_maximum = max(local_maximum, edge_limit)
+          local_sum = local_sum + edge_limit
           local_count(1) = local_count(1) + 1
           if (edge_limit .lt. &
                1.0_rp - 32.0_rp * epsilon(1.0_rp)) then
@@ -1229,16 +1235,24 @@ contains
        call profiler_start_region('Euler IDP MPI reduction')
        call MPI_Allreduce(local_minimum, global_minimum, 1, &
             MPI_REAL_PRECISION, MPI_MIN, NEKO_COMM, ierr)
+       call MPI_Allreduce(local_maximum, global_maximum, 1, &
+            MPI_REAL_PRECISION, MPI_MAX, NEKO_COMM, ierr)
+       call MPI_Allreduce(local_sum, global_sum, 1, &
+            MPI_REAL_PRECISION, MPI_SUM, NEKO_COMM, ierr)
        call MPI_Allreduce(local_count, global_count, 5, MPI_INTEGER, MPI_SUM, &
             NEKO_COMM, ierr)
        call profiler_end_region('Euler IDP MPI reduction')
 
        diagnostics%min_limiter = global_minimum
        if (global_count(1) .gt. 0) then
+          diagnostics%mean_limiter = global_sum / real(global_count(1), rp)
+          diagnostics%max_limiter = global_maximum
           diagnostics%limited_edge_fraction = &
                real(global_count(2), rp) / real(global_count(1), rp)
        else
           diagnostics%min_limiter = 1.0_rp
+          diagnostics%mean_limiter = 1.0_rp
+          diagnostics%max_limiter = 1.0_rp
           diagnostics%limited_edge_fraction = 0.0_rp
        end if
        diagnostics%density_limited_edges = global_count(3)
@@ -1249,13 +1263,15 @@ contains
   end subroutine euler_idp_cpu_compute_limiter
 
   !> Assemble the limited correction directly through graph incidence.
-  subroutine euler_idp_cpu_apply_correction(this, gs)
+  subroutine euler_idp_cpu_apply_correction(this, gs, diagnostics)
     class(euler_idp_cpu_t), intent(inout) :: this
     type(gs_t), intent(inout) :: gs
+    type(euler_idp_diagnostics_t), intent(inout) :: diagnostics
     real(kind=rp) :: left_weight, right_weight
     real(kind=rp) :: local_error, local_scale
+    real(kind=rp) :: local_conservation, global_conservation
     character(len=2 * LOG_SIZE) :: message
-    integer :: component, direction, edge
+    integer :: component, direction, edge, ierr
 
     if (this%diagnostics_level .eq. EULER_IDP_DIAGNOSTICS_FULL) then
        do component = 1, EULER_IDP_NCOMP
@@ -1338,6 +1354,15 @@ contains
     do component = 1, EULER_IDP_NCOMP
        call this%graph%incidence(this%flux_x%x, &
             this%correction_flux(component,:))
+       if (this%diagnostics_level .eq. EULER_IDP_DIAGNOSTICS_FULL) then
+          local_conservation = sum(this%flux_x%x)
+          call MPI_Allreduce(local_conservation, global_conservation, 1, &
+               MPI_REAL_PRECISION, MPI_SUM, NEKO_COMM, ierr)
+          diagnostics%limited_conservation(component) = &
+               abs(global_conservation)
+          diagnostics%correction_global_compatibility(component) = &
+               abs(global_conservation)
+       end if
        call profiler_start_region('Euler IDP gather-scatter')
        call gs%op(this%flux_x, GS_OP_ADD)
        call profiler_end_region('Euler IDP gather-scatter')

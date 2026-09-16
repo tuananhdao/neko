@@ -16,14 +16,19 @@ module user
   real(kind=rp) :: minimum_stage_density = huge(1.0_rp)
   real(kind=rp) :: minimum_stage_internal_energy = huge(1.0_rp)
   real(kind=rp) :: minimum_limiter = 1.0_rp
+  real(kind=rp) :: minimum_mean_limiter = 1.0_rp
+  real(kind=rp) :: maximum_limiter = 0.0_rp
   real(kind=rp) :: maximum_limited_fraction = 0.0_rp
   real(kind=rp) :: maximum_graph_cfl = 0.0_rp
   real(kind=rp) :: maximum_density_lower_violation = 0.0_rp
   real(kind=rp) :: maximum_density_upper_violation = 0.0_rp
   real(kind=rp) :: maximum_entropy_lower_violation = 0.0_rp
   real(kind=rp) :: maximum_stage_conservation(5) = 0.0_rp
+  real(kind=rp) :: maximum_reconstruction_residual(5) = 0.0_rp
+  real(kind=rp) :: maximum_correction_compatibility(5) = 0.0_rp
   real(kind=rp) :: boundary_metrics(8) = 0.0_rp
   integer :: stage_count = 0
+  integer :: maximum_limiter_counts(3) = 0
   logical :: all_stages_finite = .true.
 
 contains
@@ -361,8 +366,16 @@ contains
                  diagnostic%min_internal_energy)
             minimum_limiter = min(minimum_limiter, &
                  diagnostic%min_limiter)
+            minimum_mean_limiter = min(minimum_mean_limiter, &
+                 diagnostic%mean_limiter)
+            maximum_limiter = max(maximum_limiter, &
+                 diagnostic%max_limiter)
             maximum_limited_fraction = max(maximum_limited_fraction, &
                  diagnostic%limited_edge_fraction)
+            maximum_limiter_counts = max(maximum_limiter_counts, &
+                 [diagnostic%density_limited_edges, &
+                 diagnostic%internal_energy_limited_edges, &
+                 diagnostic%entropy_limited_edges])
             maximum_graph_cfl = max(maximum_graph_cfl, &
                  diagnostic%max_graph_cfl)
             maximum_density_lower_violation = &
@@ -376,16 +389,25 @@ contains
                  diagnostic%max_entropy_lower_violation)
             maximum_stage_conservation = max(maximum_stage_conservation, &
                  abs(diagnostic%limited_conservation))
+            maximum_reconstruction_residual = &
+                 max(maximum_reconstruction_residual, &
+                 abs(diagnostic%reconstruction_residual))
+            maximum_correction_compatibility = &
+                 max(maximum_correction_compatibility, &
+                 abs(diagnostic%correction_global_compatibility))
             all_stages_finite = all_stages_finite .and. &
                  diagnostic_is_finite(diagnostic%min_density, &
                  diagnostic%min_internal_energy, &
-                 diagnostic%min_limiter, &
+                 diagnostic%min_limiter, diagnostic%mean_limiter, &
+                 diagnostic%max_limiter, &
                  diagnostic%limited_edge_fraction, &
                  diagnostic%max_graph_cfl, &
                  diagnostic%max_density_lower_violation, &
                  diagnostic%max_density_upper_violation, &
                  diagnostic%max_entropy_lower_violation, &
-                 diagnostic%limited_conservation)
+                 diagnostic%limited_conservation, &
+                 diagnostic%reconstruction_residual, &
+                 diagnostic%correction_global_compatibility)
           end associate
        end do
     class default
@@ -463,6 +485,11 @@ contains
        write(*, '(A,5(1X,ES25.16E3))') 'EULER_IDP_DRIFT', drifts
        write(*, '(A,3(1X,ES25.16E3))') 'EULER_IDP_LIMITER', &
             minimum_limiter, maximum_limited_fraction, maximum_graph_cfl
+       write(*, '(A,4(1X,ES25.16E3))') 'EULER_IDP_LIMITER_STATS', &
+            minimum_limiter, minimum_mean_limiter, maximum_limiter, &
+            maximum_limited_fraction
+       write(*, '(A,3(1X,I0))') 'EULER_IDP_LIMITER_COUNTS', &
+            maximum_limiter_counts
        write(*, '(A,4(1X,ES25.16E3))') 'EULER_IDP_STATE', &
             minimum_stage_density, minimum_stage_internal_energy, &
             minimum_density, minimum_internal_energy
@@ -472,6 +499,9 @@ contains
             maximum_entropy_lower_violation
        write(*, '(A,5(1X,ES25.16E3))') 'EULER_IDP_CONSERVATION', &
             maximum_stage_conservation
+       write(*, '(A,10(1X,ES25.16E3))') 'EULER_IDP_CORRECTION', &
+            maximum_reconstruction_residual, &
+            maximum_correction_compatibility
        write(*, '(A,8(1X,ES25.16E3))') 'EULER_IDP_BOUNDARY', &
             boundary_metrics
     end if
@@ -503,24 +533,31 @@ contains
 
   !> Check every scalar carried by one stage diagnostic.
   logical function diagnostic_is_finite(rho_min, energy_min, limiter_min, &
-       limited_fraction, graph_cfl, density_lower_violation, &
-       density_upper_violation, entropy_violation, conservation) &
+       limiter_mean, limiter_max, limited_fraction, graph_cfl, &
+       density_lower_violation, density_upper_violation, entropy_violation, &
+       conservation, reconstruction, correction_compatibility) &
        result(finite)
     real(kind=rp), intent(in) :: rho_min, energy_min, limiter_min
+    real(kind=rp), intent(in) :: limiter_mean, limiter_max
     real(kind=rp), intent(in) :: limited_fraction, graph_cfl
     real(kind=rp), intent(in) :: density_lower_violation
     real(kind=rp), intent(in) :: density_upper_violation, entropy_violation
-    real(kind=rp), intent(in) :: conservation(5)
+    real(kind=rp), intent(in) :: conservation(5), reconstruction(5)
+    real(kind=rp), intent(in) :: correction_compatibility(5)
 
     finite = ieee_is_finite(rho_min) .and. &
          ieee_is_finite(energy_min) .and. &
          ieee_is_finite(limiter_min) .and. &
+         ieee_is_finite(limiter_mean) .and. &
+         ieee_is_finite(limiter_max) .and. &
          ieee_is_finite(limited_fraction) .and. &
          ieee_is_finite(graph_cfl) .and. &
          ieee_is_finite(density_lower_violation) .and. &
          ieee_is_finite(density_upper_violation) .and. &
          ieee_is_finite(entropy_violation) .and. &
-         all(ieee_is_finite(conservation))
+         all(ieee_is_finite(conservation)) .and. &
+         all(ieee_is_finite(reconstruction)) .and. &
+         all(ieee_is_finite(correction_compatibility))
   end function diagnostic_is_finite
 
   !> Check the five final conserved fields for NaN or infinity.
