@@ -62,6 +62,10 @@ def euler_idp_runtime(tmp_path_factory):
             filter(None, (str(install_lib), environment.get(variable, "")))
         )
 
+    utility_environment = environment.copy()
+    if conftest.USES_DEVICE:
+        utility_environment["CUDA_VISIBLE_DEVICES"] = "0"
+
     compile_result = subprocess.run(
         [str(makeneko), str(USER_FILE)],
         cwd=work_dir,
@@ -69,7 +73,7 @@ def euler_idp_runtime(tmp_path_factory):
         stderr=subprocess.STDOUT,
         text=True,
         errors="replace",
-        env=environment,
+        env=utility_environment,
     )
     assert compile_result.returncode == 0, (
         "makeneko failed for the Euler IDP integration driver:\n"
@@ -89,7 +93,7 @@ def euler_idp_runtime(tmp_path_factory):
             stderr=subprocess.STDOUT,
             text=True,
             errors="replace",
-            env=environment,
+            env=utility_environment,
         )
         assert mesh_result.returncode == 0, (
             f"genmeshbox failed for {name}:\n" + mesh_result.stdout
@@ -104,7 +108,7 @@ def euler_idp_runtime(tmp_path_factory):
             stderr=subprocess.STDOUT,
             text=True,
             errors="replace",
-            env=environment,
+            env=utility_environment,
         )
         assert check_result.returncode == 0, (
             f"mesh_checker rejected {name}:\n" + check_result.stdout
