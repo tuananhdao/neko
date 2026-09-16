@@ -580,7 +580,7 @@ contains
     type(c_ptr) :: entropy_fraction_d
     real(kind=rp) :: maximum_floor_timestep
     character(len=2 * LOG_SIZE) :: message
-    integer :: affine, check_base, enforce_energy, enforce_entropy
+    integer :: affine, check_base, component, enforce_energy, enforce_entropy
     integer :: has_entropy, low_only, n, n_edges, periodic, scalar_mode
 
 #ifndef HAVE_CUDA
@@ -603,10 +603,9 @@ contains
          this%low_candidate(2)%x_d, this%low_candidate(3)%x_d, &
          this%low_candidate(4)%x_d, this%low_candidate(5)%x_d, gamma, &
          periodic, n, n_edges)
-    call gs%op(this%low_candidate(1), GS_OP_ADD)
-    call gs%op(this%low_candidate(2)%x, this%low_candidate(3)%x, &
-         this%low_candidate(4)%x, n, GS_OP_ADD)
-    call gs%op(this%low_candidate(5), GS_OP_ADD)
+    do component = 1, EULER_IDP_NCOMP
+       call gs%op(this%low_candidate(component), GS_OP_ADD)
+    end do
     call cuda_euler_idp_scale_residual(this%low_candidate(1)%x_d, &
          this%low_candidate(2)%x_d, this%low_candidate(3)%x_d, &
          this%low_candidate(4)%x_d, this%low_candidate(5)%x_d, &
@@ -728,10 +727,9 @@ contains
        call euler_idp_device_collect_full_diagnostics(this, rho, m_x, m_y, &
             m_z, energy, gamma, entropy_fraction_d, has_entropy, diagnostics)
     end if
-    call gs%op(this%local_residual(1), GS_OP_ADD)
-    call gs%op(this%local_residual(2)%x, this%local_residual(3)%x, &
-         this%local_residual(4)%x, n, GS_OP_ADD)
-    call gs%op(this%local_residual(5), GS_OP_ADD)
+    do component = 1, EULER_IDP_NCOMP
+       call gs%op(this%local_residual(component), GS_OP_ADD)
+    end do
     call cuda_euler_idp_correction_update(this%low_candidate(1)%x_d, &
          this%low_candidate(2)%x_d, this%low_candidate(3)%x_d, &
          this%low_candidate(4)%x_d, this%low_candidate(5)%x_d, &
