@@ -78,7 +78,10 @@ void cuda_entropy_visc_apply_element_max(void *reg_coeff,
                                          int *lx,
                                          int *nelv) {
   const int lx3 = (*lx) * (*lx) * (*lx);
-  const int nthrds_x = min(1024, lx3);
+  // The shared-memory reduction requires a power-of-two block size.  A
+  // fixed block also covers elements larger than the block through the
+  // grid-stride loop in the kernel.
+  const int nthrds_x = 256;
   const dim3 nthrds(nthrds_x, 1, 1);
   const dim3 nblcks(*nelv, 1, 1);
   const cudaStream_t stream = (cudaStream_t) glb_cmd_queue;
