@@ -980,7 +980,8 @@ contains
     call this%compute_bounds(rho, m_x, m_y, m_z, energy, gs, gamma, &
          diagnostics)
 
-    if (present(entropy_viscosity_fraction)) then
+    if (present(entropy_viscosity_fraction) .and. &
+         this%diagnostics_level .eq. EULER_IDP_DIAGNOSTICS_FULL) then
        local_entropy_max = 0.0_rp
        local_entropy_sum = 0.0_rp
        if (rho%size() .gt. 0) then

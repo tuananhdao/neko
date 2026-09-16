@@ -33,6 +33,10 @@ module euler_idp_device_kernels
   public :: cuda_euler_idp_relax_finalize, cuda_euler_idp_blend
   public :: cuda_euler_idp_limiter, cuda_euler_idp_incidence
   public :: cuda_euler_idp_correction_update, cuda_euler_idp_validate
+  public :: cuda_euler_idp_full_diagnostics
+  public :: cuda_euler_idp_validation_summary
+  public :: cuda_euler_idp_observation_summary
+  public :: cuda_euler_idp_limiter_status
   public :: cuda_euler_idp_update_uvw
   public :: cuda_euler_idp_update_momentum_pressure
   public :: cuda_euler_idp_update_energy
@@ -225,6 +229,46 @@ module euler_idp_device_kernels
        real(c_rp) :: gamma
        integer(c_int) :: use_entropy, n
      end subroutine cuda_euler_idp_validate
+
+     subroutine cuda_euler_idp_full_diagnostics(rho, mx, my, mz, energy, &
+          gamma, entropy_fraction, has_entropy, edge_limit, limited, &
+          density_flag, energy_flag, entropy_flag, correction, r0, r1, r2, &
+          r3, r4, directional_error, summary, n, n_edges) bind(c, name = &
+          'cuda_euler_idp_full_diagnostics')
+       import c_ptr, c_int, c_rp
+       type(c_ptr), value :: rho, mx, my, mz, energy, entropy_fraction
+       type(c_ptr), value :: edge_limit, limited, density_flag, energy_flag
+       type(c_ptr), value :: entropy_flag, correction
+       type(c_ptr), value :: r0, r1, r2, r3, r4
+       type(c_ptr), value :: directional_error, summary
+       real(c_rp) :: gamma
+       integer(c_int) :: has_entropy, n, n_edges
+     end subroutine cuda_euler_idp_full_diagnostics
+
+     subroutine cuda_euler_idp_validation_summary(q0, q1, q2, q3, q4, &
+          lower, upper, entropy_lower, summary, gamma, use_entropy, n) &
+          bind(c, name = 'cuda_euler_idp_validation_summary')
+       import c_ptr, c_int, c_rp
+       type(c_ptr), value :: q0, q1, q2, q3, q4, lower, upper
+       type(c_ptr), value :: entropy_lower, summary
+       real(c_rp) :: gamma
+       integer(c_int) :: use_entropy, n
+     end subroutine cuda_euler_idp_validation_summary
+
+     subroutine cuda_euler_idp_observation_summary(rho, internal, pressure, &
+          u, v, w, sound, summary, n) bind(c, name = &
+          'cuda_euler_idp_observation_summary')
+       import c_ptr, c_int
+       type(c_ptr), value :: rho, internal, pressure, u, v, w, sound, summary
+       integer(c_int) :: n
+     end subroutine cuda_euler_idp_observation_summary
+
+     subroutine cuda_euler_idp_limiter_status(edge_limit, summary, n_edges) &
+          bind(c, name = 'cuda_euler_idp_limiter_status')
+       import c_ptr, c_int
+       type(c_ptr), value :: edge_limit, summary
+       integer(c_int) :: n_edges
+     end subroutine cuda_euler_idp_limiter_status
 
      subroutine cuda_euler_idp_update_uvw(u, v, w, mx, my, mz, rho, n) &
           bind(c, name = 'cuda_euler_idp_update_uvw')

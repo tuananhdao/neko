@@ -775,6 +775,140 @@ __global__ void validation_kernel(const T *q0,const T *q1,const T *q2,
     const T ent=specific_entropy(s,gamma);entropy_value[i]=ent;
     entropy_v[i]=use_entropy?rmax(T(0),entropy_lower[i]-ent-entropy_tolerance(s,entropy_lower[i])):T(0);}}
 
+enum diagnostic_summary_kind {
+  full_summary = 0,
+  validation_summary = 1,
+  observation_summary = 2,
+  limiter_status_summary = 3
+};
+
+template<typename T>
+__global__ void diagnostic_summary_init_kernel(T *summary, int size,
+                                                int kind) {
+  if (blockIdx.x != 0 || threadIdx.x != 0) return;
+  for (int i = 0; i < size; ++i) summary[i] = T(0);
+  if (kind == full_summary) {
+    summary[3] = real_huge<T>();
+  } else if (kind == validation_summary) {
+    for (int i = 3; i <= 6; ++i) summary[i] = real_huge<T>();
+  } else if (kind == observation_summary) {
+    for (int i = 0; i <= 2; ++i) summary[i] = real_huge<T>();
+  } else if (kind == limiter_status_summary) {
+    summary[0] = real_huge<T>();
+    summary[1] = -real_huge<T>();
+  }
+}
+
+template<typename T>
+__global__ void full_diagnostics_kernel(const T *rho, const T *mx,
+  const T *my, const T *mz, const T *energy, T gamma,
+  const T *entropy_fraction, int has_entropy,
+  const T *edge_limit, const T *limited, const T *density_flag,
+  const T *energy_flag, const T *entropy_flag, const T *correction,
+  const T *r0, const T *r1, const T *r2, const T *r3, const T *r4,
+  const T *directional_error, T *summary, int n, int nedge) {
+  const T *residual[5] = {r0, r1, r2, r3, r4};
+  const T eps = real_epsilon<T>();
+  const int count = n > nedge ? n : nedge;
+  for (int i = blockIdx.x * blockDim.x + threadIdx.x; i < count;
+       i += blockDim.x * gridDim.x) {
+    if (i < n) {
+      T state[5];
+      load_state(rho, mx, my, mz, energy, i, state);
+      const T pressure = (gamma - T(1)) * internal_energy(state);
+      const T velocity = sqrt(mx[i]*mx[i] + my[i]*my[i] + mz[i]*mz[i]) /
+        rho[i];
+      const T wave = velocity + sqrt(gamma * pressure / rho[i]);
+      atomic_max_real(summary, wave);
+      if (has_entropy) {
+        atomic_max_real(summary + 1, entropy_fraction[i]);
+        atomicAdd(summary + 2, entropy_fraction[i]);
+      }
+      for (int c = 0; c < 5; ++c)
+        atomicAdd(summary + 10 + c, residual[c][i]);
+    }
+    if (i < nedge) {
+      const T limit = edge_limit[i];
+      atomic_min_real(summary + 3, limit);
+      atomic_max_real(summary + 4, limit);
+      atomicAdd(summary + 5, limit);
+      atomicAdd(summary + 6, limited[i]);
+      atomicAdd(summary + 7, density_flag[i]);
+      atomicAdd(summary + 8, energy_flag[i]);
+      atomicAdd(summary + 9, entropy_flag[i]);
+      if (!isfinite(limit) || limit < -T(32)*eps ||
+          limit > T(1) + T(32)*eps)
+        atomicAdd(summary + 22, T(1));
+      for (int c = 0; c < 5; ++c) {
+        const T value = correction[5*i+c];
+        atomic_max_real(summary + 20, fabs(value));
+        atomicAdd(summary + 21, value*value);
+      }
+    }
+    if (i < 5) summary[15+i] = directional_error[i];
+  }
+}
+
+template<typename T>
+__global__ void validation_summary_kernel(const T *q0, const T *q1,
+  const T *q2, const T *q3, const T *q4, const T *lower, const T *upper,
+  const T *entropy_lower, T *summary, T gamma, int use_entropy, int n) {
+  for (int i = blockIdx.x * blockDim.x + threadIdx.x; i < n;
+       i += blockDim.x * gridDim.x) {
+    T state[5];
+    load_state(q0, q1, q2, q3, q4, i, state);
+    const T internal = internal_energy(state);
+    const T pressure = (gamma - T(1)) * internal;
+    const T entropy = specific_entropy(state, gamma);
+    const T lower_violation = rmax(T(0), lower[i] - q0[i]);
+    const T upper_violation = rmax(T(0), q0[i] - upper[i]);
+    const T entropy_violation = use_entropy ?
+      rmax(T(0), entropy_lower[i] - entropy -
+           entropy_tolerance(state, entropy_lower[i])) : T(0);
+    atomic_max_real(summary, lower_violation);
+    atomic_max_real(summary + 1, upper_violation);
+    atomic_max_real(summary + 2, entropy_violation);
+    atomic_min_real(summary + 3, q0[i]);
+    atomic_min_real(summary + 4, internal);
+    atomic_min_real(summary + 5, pressure);
+    atomic_min_real(summary + 6, entropy);
+    atomic_max_real(summary + 7, rmax(q0[i], upper[i]));
+    bool invalid = q0[i] <= T(0) || !isfinite(internal) || internal <= T(0) ||
+      !isfinite(pressure) || pressure <= T(0) || !isfinite(entropy);
+    for (int c = 0; c < 5; ++c) invalid = invalid || !isfinite(state[c]);
+    if (invalid) atomicAdd(summary + 8, T(1));
+  }
+}
+
+template<typename T>
+__global__ void observation_summary_kernel(const T *rho, const T *internal,
+  const T *pressure, const T *u, const T *v, const T *w, const T *sound,
+  T *summary, int n) {
+  for (int i = blockIdx.x * blockDim.x + threadIdx.x; i < n;
+       i += blockDim.x * gridDim.x) {
+    atomic_min_real(summary, rho[i]);
+    atomic_min_real(summary + 1, internal[i]);
+    atomic_min_real(summary + 2, pressure[i]);
+    const T wave = sqrt(u[i]*u[i] + v[i]*v[i] + w[i]*w[i]) + sound[i];
+    atomic_max_real(summary + 3, wave);
+  }
+}
+
+template<typename T>
+__global__ void limiter_status_kernel(const T *edge_limit, T *summary,
+                                      int nedge) {
+  const T eps = real_epsilon<T>();
+  for (int i = blockIdx.x * blockDim.x + threadIdx.x; i < nedge;
+       i += blockDim.x * gridDim.x) {
+    const T limit = edge_limit[i];
+    atomic_min_real(summary, limit);
+    atomic_max_real(summary + 1, limit);
+    if (!isfinite(limit) || limit < -T(32)*eps ||
+        limit > T(1) + T(32)*eps)
+      atomicAdd(summary + 2, T(1));
+  }
+}
+
 template<typename T>
 __global__ void update_uvw_kernel_idp(T *u,T *v,T *w,const T *mx,const T *my,
   const T *mz,const T *rho,int n){for(int i=blockIdx.x*blockDim.x+threadIdx.x;i<n;i+=blockDim.x*gridDim.x){u[i]=mx[i]/rho[i];v[i]=my[i]/rho[i];w[i]=mz[i]/rho[i];}}
@@ -872,6 +1006,45 @@ void cuda_euler_idp_correction_update(void *q0,void *q1,void *q2,void *q3,
 void cuda_euler_idp_validate(void *q0,void *q1,void *q2,void *q3,void *q4,
   void *lower,void *upper,void *entropy_lower,void *lower_v,void *upper_v,
   void *entropy_v,void *entropy_value,real *gamma,int *use_entropy,int *n){cudaStream_t s=(cudaStream_t)glb_cmd_queue;validation_kernel<real><<<blocks(*n),threads(),0,s>>>((real*)q0,(real*)q1,(real*)q2,(real*)q3,(real*)q4,(real*)lower,(real*)upper,(real*)entropy_lower,(real*)lower_v,(real*)upper_v,(real*)entropy_v,(real*)entropy_value,*gamma,*use_entropy,*n);CUDA_CHECK(cudaGetLastError());}
+
+void cuda_euler_idp_full_diagnostics(void *rho,void *mx,void *my,void *mz,
+  void *energy,real *gamma,void *entropy_fraction,int *has_entropy,
+  void *edge_limit,void *limited,
+  void *density_flag,void *energy_flag,void *entropy_flag,void *correction,
+  void *r0,void *r1,void *r2,void *r3,void *r4,void *directional_error,
+  void *summary,int *n,int *nedge){cudaStream_t s=(cudaStream_t)glb_cmd_queue;
+  diagnostic_summary_init_kernel<real><<<1,1,0,s>>>((real*)summary,23,full_summary);
+  int count=*n>*nedge?*n:*nedge;if(count<5)count=5;
+  full_diagnostics_kernel<real><<<blocks(count),threads(),0,s>>>((real*)rho,
+    (real*)mx,(real*)my,(real*)mz,(real*)energy,*gamma,
+    (real*)entropy_fraction,*has_entropy,
+    (real*)edge_limit,(real*)limited,(real*)density_flag,(real*)energy_flag,
+    (real*)entropy_flag,(real*)correction,(real*)r0,(real*)r1,(real*)r2,
+    (real*)r3,(real*)r4,(real*)directional_error,(real*)summary,*n,*nedge);
+  CUDA_CHECK(cudaGetLastError());}
+
+void cuda_euler_idp_validation_summary(void *q0,void *q1,void *q2,void *q3,
+  void *q4,void *lower,void *upper,void *entropy_lower,void *summary,
+  real *gamma,int *use_entropy,int *n){cudaStream_t s=(cudaStream_t)glb_cmd_queue;
+  diagnostic_summary_init_kernel<real><<<1,1,0,s>>>((real*)summary,9,validation_summary);
+  validation_summary_kernel<real><<<blocks(*n),threads(),0,s>>>((real*)q0,
+    (real*)q1,(real*)q2,(real*)q3,(real*)q4,(real*)lower,(real*)upper,
+    (real*)entropy_lower,(real*)summary,*gamma,*use_entropy,*n);
+  CUDA_CHECK(cudaGetLastError());}
+
+void cuda_euler_idp_observation_summary(void *rho,void *internal,
+  void *pressure,void *u,void *v,void *w,void *sound,void *summary,int *n){
+  cudaStream_t s=(cudaStream_t)glb_cmd_queue;
+  diagnostic_summary_init_kernel<real><<<1,1,0,s>>>((real*)summary,4,observation_summary);
+  observation_summary_kernel<real><<<blocks(*n),threads(),0,s>>>((real*)rho,
+    (real*)internal,(real*)pressure,(real*)u,(real*)v,(real*)w,(real*)sound,
+    (real*)summary,*n);CUDA_CHECK(cudaGetLastError());}
+
+void cuda_euler_idp_limiter_status(void *edge_limit,void *summary,int *nedge){
+  cudaStream_t s=(cudaStream_t)glb_cmd_queue;
+  diagnostic_summary_init_kernel<real><<<1,1,0,s>>>((real*)summary,3,limiter_status_summary);
+  limiter_status_kernel<real><<<blocks(*nedge),threads(),0,s>>>(
+    (real*)edge_limit,(real*)summary,*nedge);CUDA_CHECK(cudaGetLastError());}
 
 void cuda_euler_idp_update_uvw(void *u,void *v,void *w,void *mx,void *my,
   void *mz,void *rho,int *n){cudaStream_t s=(cudaStream_t)glb_cmd_queue;update_uvw_kernel_idp<real><<<blocks(*n),threads(),0,s>>>((real*)u,(real*)v,(real*)w,(real*)mx,(real*)my,(real*)mz,(real*)rho,*n);CUDA_CHECK(cudaGetLastError());}

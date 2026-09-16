@@ -109,3 +109,6 @@ install
 
 # Directory to stash temporary files during development
 .temp
+
+# Local GPU execution notebook
+/gpu_run.ipynb

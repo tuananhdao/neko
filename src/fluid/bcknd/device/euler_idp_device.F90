@@ -33,10 +33,11 @@ module euler_idp_device
   use device, only : device_map, device_unmap, device_memcpy, &
        HOST_TO_DEVICE, DEVICE_TO_HOST
   use device_math, only : device_add3s2, device_cmult2, device_copy, &
-       device_glmax, device_glmin, device_glsum
+       device_glmax, device_glmin
   use euler_gll_graph, only : euler_gll_graph_t
   use euler_idp_backend, only : EULER_IDP_NCOMP, &
-       EULER_IDP_DIAGNOSTICS_OFF, EULER_IDP_DIAGNOSTICS_FULL, &
+       EULER_IDP_DIAGNOSTICS_OFF, EULER_IDP_DIAGNOSTICS_SAFETY, &
+       EULER_IDP_DIAGNOSTICS_FULL, &
        euler_idp_backend_t, euler_idp_diagnostics_t, &
        euler_idp_state_observation_t
 #ifdef HAVE_CUDA
@@ -47,6 +48,11 @@ module euler_idp_device
   use utils, only : neko_error
   implicit none
   private
+
+  integer, parameter :: EULER_IDP_DEVICE_DIAGNOSTICS_SIZE = 23
+  integer, parameter :: EULER_IDP_DEVICE_VALIDATION_SIZE = 9
+  integer, parameter :: EULER_IDP_DEVICE_OBSERVATION_SIZE = 4
+  integer, parameter :: EULER_IDP_DEVICE_LIMITER_STATUS_SIZE = 3
 
   type, public, extends(euler_idp_backend_t) :: euler_idp_device_t
      logical :: periodic_graph = .false.
@@ -82,6 +88,7 @@ module euler_idp_device
      real(kind=rp), allocatable :: edge_energy_limited(:)
      real(kind=rp), allocatable :: edge_entropy_limited(:)
      real(kind=rp), allocatable :: directional_error(:)
+     real(kind=rp), allocatable :: diagnostic_summary(:)
      type(c_ptr) :: edge_left_d = c_null_ptr
      type(c_ptr) :: edge_right_d = c_null_ptr
      type(c_ptr) :: edge_direction_d = c_null_ptr
@@ -95,6 +102,9 @@ module euler_idp_device
      type(c_ptr) :: edge_energy_limited_d = c_null_ptr
      type(c_ptr) :: edge_entropy_limited_d = c_null_ptr
      type(c_ptr) :: directional_error_d = c_null_ptr
+     type(c_ptr) :: diagnostic_summary_d = c_null_ptr
+     integer :: global_node_count = 0
+     integer :: global_edge_count = 0
    contains
      procedure, pass(this) :: init => euler_idp_device_init
      procedure, pass(this) :: init_graph => euler_idp_device_init_graph
@@ -220,6 +230,10 @@ contains
     allocate(this%edge_energy_limited(this%graph%n_edges))
     allocate(this%edge_entropy_limited(this%graph%n_edges))
     allocate(this%directional_error(EULER_IDP_NCOMP))
+    if (diagnostics_level .ne. EULER_IDP_DIAGNOSTICS_OFF) then
+       allocate(this%diagnostic_summary(EULER_IDP_DEVICE_DIAGNOSTICS_SIZE))
+       this%diagnostic_summary = 0.0_rp
+    end if
     do edge = 1, this%graph%n_edges
        a = this%graph%left(:,edge)
        b = this%graph%right(:,edge)
@@ -240,6 +254,14 @@ contains
     this%edge_energy_limited = 0.0_rp
     this%edge_entropy_limited = 0.0_rp
     this%directional_error = 0.0_rp
+    this%global_node_count = n
+    this%global_edge_count = this%graph%n_edges
+    if (diagnostics_level .eq. EULER_IDP_DIAGNOSTICS_FULL) then
+       call MPI_Allreduce(n, this%global_node_count, 1, MPI_INTEGER, MPI_SUM, &
+            NEKO_COMM, ierr)
+       call MPI_Allreduce(this%graph%n_edges, this%global_edge_count, 1, &
+            MPI_INTEGER, MPI_SUM, NEKO_COMM, ierr)
+    end if
     call euler_idp_device_map_graph(this)
 
     this%work_1%x = 0.0_rp
@@ -301,6 +323,10 @@ contains
          this%edge_entropy_limited_d, n_edges)
     call device_map(this%directional_error, this%directional_error_d, &
          EULER_IDP_NCOMP)
+    if (allocated(this%diagnostic_summary)) then
+       call device_map(this%diagnostic_summary, this%diagnostic_summary_d, &
+            EULER_IDP_DEVICE_DIAGNOSTICS_SIZE)
+    end if
     call device_memcpy(this%edge_left, this%edge_left_d, n_edges, &
          HOST_TO_DEVICE, sync = .false.)
     call device_memcpy(this%edge_right, this%edge_right_d, n_edges, &
@@ -349,6 +375,8 @@ contains
     this%domain_volume = 0.0_rp
     this%density_relaxation_mass = 0.0_rp
     this%limiter_weight_error = 0.0_rp
+    this%global_node_count = 0
+    this%global_edge_count = 0
   end subroutine euler_idp_device_free
 
   subroutine euler_idp_device_unmap_graph(this)
@@ -410,6 +438,11 @@ contains
        call device_unmap(this%directional_error, this%directional_error_d)
        deallocate(this%directional_error)
     end if
+    if (allocated(this%diagnostic_summary)) then
+       call device_unmap(this%diagnostic_summary, &
+            this%diagnostic_summary_d)
+       deallocate(this%diagnostic_summary)
+    end if
   end subroutine euler_idp_device_unmap_graph
 
   subroutine euler_idp_device_primitives(this, rho, m_x, m_y, m_z, energy, &
@@ -426,7 +459,8 @@ contains
          energy%x_d, this%u%x_d, this%v%x_d, this%w%x_d, this%p%x_d, &
          this%sound_speed%x_d, this%internal_energy%x_d, this%work_1%x_d, &
          gamma, internal_energy_floor, n)
-    if (device_glmax(this%work_1%x_d, n) .gt. 0.0_rp) then
+    if (this%diagnostics_level .ne. EULER_IDP_DIAGNOSTICS_OFF .and. &
+         device_glmax(this%work_1%x_d, n) .gt. 0.0_rp) then
        call neko_error('Euler IDP ' // trim(label) // &
             ' has invalid density or internal energy on the device')
     end if
@@ -512,12 +546,10 @@ contains
     type(field_t), intent(in), optional :: entropy_viscosity_fraction
     type(field_t), intent(in), optional :: graph_wave_speed
     type(c_ptr) :: entropy_fraction_d
-    real(kind=rp) :: global_error(EULER_IDP_NCOMP)
     real(kind=rp) :: maximum_floor_timestep
     character(len=2 * LOG_SIZE) :: message
     integer :: affine, check_base, component, enforce_energy, enforce_entropy
-    integer :: global_edge_count, global_node_count
-    integer :: has_entropy, ierr, low_only, n, n_edges, periodic, scalar_mode
+    integer :: has_entropy, low_only, n, n_edges, periodic, scalar_mode
 
 #ifndef HAVE_CUDA
     call neko_error('Euler IDP Forward Euler update requires CUDA')
@@ -528,10 +560,6 @@ contains
     diagnostics%entropy_viscosity_enabled = &
          present(entropy_viscosity_fraction)
     n = rho%size(); n_edges = this%graph%n_edges
-    call MPI_Allreduce(n, global_node_count, 1, MPI_INTEGER, MPI_SUM, &
-         NEKO_COMM, ierr)
-    call MPI_Allreduce(n_edges, global_edge_count, 1, MPI_INTEGER, MPI_SUM, &
-         NEKO_COMM, ierr)
     periodic = merge(1, 0, this%periodic_graph)
     scalar_mode = merge(1, 0, present(graph_wave_speed) .and. &
          .not. this%limit_internal_energy .and. .not. this%limit_entropy)
@@ -578,21 +606,6 @@ contains
        call neko_error(trim(message))
     end if
 
-    if (this%diagnostics_level .eq. EULER_IDP_DIAGNOSTICS_FULL) then
-       call cuda_euler_idp_nodal_wave(this%u%x_d, this%v%x_d, this%w%x_d, &
-            this%sound_speed%x_d, this%work_1%x_d, n)
-       diagnostics%max_nodal_wave_speed = device_glmax(this%work_1%x_d, n)
-       call device_memcpy(this%directional_error, this%directional_error_d, &
-            EULER_IDP_NCOMP, DEVICE_TO_HOST, sync = .true.)
-       call MPI_Allreduce(this%directional_error, global_error, &
-            EULER_IDP_NCOMP, MPI_REAL_PRECISION, MPI_MAX, NEKO_COMM, ierr)
-       diagnostics%reconstruction_residual = global_error
-       diagnostics%correction_element_compatibility = global_error
-       if (maxval(global_error) .gt. 10.0_rp * this%correction_tolerance) then
-          call neko_error('Euler IDP device reconstruction is not compatible')
-       end if
-    end if
-
     if (this%limit_internal_energy) then
        call cuda_euler_idp_floor_timestep(rho%x_d, m_x%x_d, m_y%x_d, &
             m_z%x_d, energy%x_d, this%low_candidate(1)%x_d, &
@@ -631,11 +644,6 @@ contains
     entropy_fraction_d = rho%x_d
     if (present(entropy_viscosity_fraction)) then
        entropy_fraction_d = entropy_viscosity_fraction%x_d
-       diagnostics%max_entropy_viscosity = &
-            device_glmax(entropy_viscosity_fraction%x_d, n)
-       diagnostics%mean_entropy_viscosity = &
-            device_glsum(entropy_viscosity_fraction%x_d, n) / &
-            real(max(1, global_node_count), rp)
     end if
     call cuda_euler_idp_blend(rho%x_d, m_x%x_d, m_y%x_d, m_z%x_d, &
          energy%x_d, this%edge_left_d, this%edge_right_d, &
@@ -671,20 +679,8 @@ contains
          this%graph%n_directions, n_edges)
 
     diagnostics%limiter_weight_error = this%limiter_weight_error
-    if (this%diagnostics_level .eq. EULER_IDP_DIAGNOSTICS_FULL) then
-       diagnostics%min_limiter = device_glmin(this%edge_work_d, n_edges)
-       diagnostics%max_limiter = device_glmax(this%edge_work_d, n_edges)
-       diagnostics%mean_limiter = device_glsum(this%edge_work_d, n_edges) / &
-            real(max(1, global_edge_count), rp)
-       diagnostics%limited_edge_fraction = &
-            device_glsum(this%edge_limited_d, n_edges) / &
-            real(max(1, global_edge_count), rp)
-       diagnostics%density_limited_edges = nint( &
-            device_glsum(this%edge_density_limited_d, n_edges))
-       diagnostics%internal_energy_limited_edges = nint( &
-            device_glsum(this%edge_energy_limited_d, n_edges))
-       diagnostics%entropy_limited_edges = nint( &
-            device_glsum(this%edge_entropy_limited_d, n_edges))
+    if (this%diagnostics_level .eq. EULER_IDP_DIAGNOSTICS_SAFETY) then
+       call euler_idp_device_check_limiter_status(this)
     end if
 
     call cuda_euler_idp_incidence(this%edge_left_d, this%edge_right_d, &
@@ -695,12 +691,8 @@ contains
          this%local_residual(3)%x_d, this%local_residual(4)%x_d, &
          this%local_residual(5)%x_d, n, n_edges)
     if (this%diagnostics_level .eq. EULER_IDP_DIAGNOSTICS_FULL) then
-       do component = 1, EULER_IDP_NCOMP
-          global_error(component) = abs(device_glsum( &
-               this%local_residual(component)%x_d, n))
-       end do
-       diagnostics%limited_conservation = global_error
-       diagnostics%correction_global_compatibility = global_error
+       call euler_idp_device_collect_full_diagnostics(this, rho, m_x, m_y, &
+            m_z, energy, gamma, entropy_fraction_d, has_entropy, diagnostics)
     end if
     do component = 1, EULER_IDP_NCOMP
        call gs%op(this%local_residual(component), GS_OP_ADD)
@@ -713,6 +705,189 @@ contains
          this%local_residual(5)%x_d, this%graph%mass%x_d, n)
 #endif
   end subroutine euler_idp_device_forward_euler
+
+  !> Collect full stage statistics on the device and copy one compact buffer.
+  subroutine euler_idp_device_collect_full_diagnostics(this, rho, m_x, m_y, &
+       m_z, energy, gamma, entropy_fraction_d, has_entropy, diagnostics)
+    class(euler_idp_device_t), intent(inout) :: this
+    type(field_t), intent(in) :: rho, m_x, m_y, m_z, energy
+    real(kind=rp), intent(in) :: gamma
+    type(c_ptr), intent(in) :: entropy_fraction_d
+    integer, intent(in) :: has_entropy
+    type(euler_idp_diagnostics_t), intent(inout) :: diagnostics
+    real(kind=rp) :: local_maximum(9), global_maximum(9)
+    real(kind=rp) :: local_sum(13), global_sum(13)
+    real(kind=rp) :: local_minimum, global_minimum
+    real(kind=rp) :: limiter_tolerance
+    integer :: ierr, n, n_edges
+
+#ifdef HAVE_CUDA
+    n = this%low_candidate(1)%size()
+    n_edges = this%graph%n_edges
+    call cuda_euler_idp_full_diagnostics(rho%x_d, m_x%x_d, m_y%x_d, &
+         m_z%x_d, energy%x_d, gamma, entropy_fraction_d, has_entropy, &
+         this%edge_work_d, this%edge_limited_d, &
+         this%edge_density_limited_d, this%edge_energy_limited_d, &
+         this%edge_entropy_limited_d, this%correction_flux_d, &
+         this%local_residual(1)%x_d, this%local_residual(2)%x_d, &
+         this%local_residual(3)%x_d, this%local_residual(4)%x_d, &
+         this%local_residual(5)%x_d, this%directional_error_d, &
+         this%diagnostic_summary_d, n, n_edges)
+    call device_memcpy(this%diagnostic_summary, &
+         this%diagnostic_summary_d, EULER_IDP_DEVICE_DIAGNOSTICS_SIZE, &
+         DEVICE_TO_HOST, sync = .true.)
+
+    local_maximum = [this%diagnostic_summary(1), &
+         this%diagnostic_summary(2), this%diagnostic_summary(5), &
+         this%diagnostic_summary(16:20), this%diagnostic_summary(21)]
+    local_minimum = this%diagnostic_summary(4)
+    local_sum = [this%diagnostic_summary(3), &
+         this%diagnostic_summary(6:10), this%diagnostic_summary(11:15), &
+         this%diagnostic_summary(22:23)]
+    call MPI_Allreduce(local_maximum, global_maximum, size(local_maximum), &
+         MPI_REAL_PRECISION, MPI_MAX, NEKO_COMM, ierr)
+    call MPI_Allreduce(local_minimum, global_minimum, 1, &
+         MPI_REAL_PRECISION, MPI_MIN, NEKO_COMM, ierr)
+    call MPI_Allreduce(local_sum, global_sum, size(local_sum), &
+         MPI_REAL_PRECISION, MPI_SUM, NEKO_COMM, ierr)
+
+    diagnostics%max_nodal_wave_speed = global_maximum(1)
+    if (has_entropy .ne. 0) then
+       diagnostics%max_entropy_viscosity = global_maximum(2)
+       diagnostics%mean_entropy_viscosity = global_sum(1) / &
+            real(max(1, this%global_node_count), rp)
+    end if
+    if (this%global_edge_count .gt. 0) then
+       diagnostics%min_limiter = global_minimum
+       diagnostics%max_limiter = global_maximum(3)
+       diagnostics%mean_limiter = global_sum(2) / &
+            real(this%global_edge_count, rp)
+       diagnostics%limited_edge_fraction = global_sum(3) / &
+            real(this%global_edge_count, rp)
+    end if
+    diagnostics%density_limited_edges = nint(global_sum(4))
+    diagnostics%internal_energy_limited_edges = nint(global_sum(5))
+    diagnostics%entropy_limited_edges = nint(global_sum(6))
+    diagnostics%limited_conservation = abs(global_sum(7:11))
+    diagnostics%correction_global_compatibility = abs(global_sum(7:11))
+    diagnostics%reconstruction_residual = global_maximum(4:8)
+    diagnostics%correction_element_compatibility = global_maximum(4:8)
+    diagnostics%max_correction_flux = global_maximum(9)
+    diagnostics%rms_correction_flux = sqrt(global_sum(12) / &
+         real(max(1, EULER_IDP_NCOMP * this%global_edge_count), rp))
+
+    limiter_tolerance = 32.0_rp * epsilon(1.0_rp)
+    if (global_sum(13) .gt. 0.0_rp .or. &
+         .not. ieee_is_finite(diagnostics%min_limiter) .or. &
+         .not. ieee_is_finite(diagnostics%max_limiter) .or. &
+         diagnostics%min_limiter .lt. -limiter_tolerance .or. &
+         diagnostics%max_limiter .gt. 1.0_rp + limiter_tolerance) then
+       call neko_error('Euler IDP device limiter is outside [0,1]')
+    end if
+    if (maxval(diagnostics%reconstruction_residual) .gt. &
+         10.0_rp * this%correction_tolerance) then
+       call neko_error('Euler IDP device reconstruction is not compatible')
+    end if
+#endif
+  end subroutine euler_idp_device_collect_full_diagnostics
+
+  !> Check the limiter using only a compact device status reduction.
+  subroutine euler_idp_device_check_limiter_status(this)
+    class(euler_idp_device_t), intent(inout) :: this
+    real(kind=rp) :: local_extrema(2), global_extrema(2)
+    real(kind=rp) :: local_invalid, global_invalid, tolerance
+    integer :: ierr, n_edges
+
+#ifdef HAVE_CUDA
+    n_edges = this%graph%n_edges
+    call cuda_euler_idp_limiter_status(this%edge_work_d, &
+         this%diagnostic_summary_d, n_edges)
+    call device_memcpy(this%diagnostic_summary, &
+         this%diagnostic_summary_d, EULER_IDP_DEVICE_LIMITER_STATUS_SIZE, &
+         DEVICE_TO_HOST, sync = .true.)
+    local_extrema = this%diagnostic_summary(1:2)
+    local_invalid = this%diagnostic_summary(3)
+    call MPI_Allreduce(local_extrema(1), global_extrema(1), 1, &
+         MPI_REAL_PRECISION, MPI_MIN, NEKO_COMM, ierr)
+    call MPI_Allreduce(local_extrema(2), global_extrema(2), 1, &
+         MPI_REAL_PRECISION, MPI_MAX, NEKO_COMM, ierr)
+    call MPI_Allreduce(local_invalid, global_invalid, 1, &
+         MPI_REAL_PRECISION, MPI_SUM, NEKO_COMM, ierr)
+    tolerance = 32.0_rp * epsilon(1.0_rp)
+    if (global_invalid .gt. 0.0_rp .or. &
+         .not. all(ieee_is_finite(global_extrema)) .or. &
+         global_extrema(1) .lt. -tolerance .or. &
+         global_extrema(2) .gt. 1.0_rp + tolerance) then
+       call neko_error('Euler IDP device limiter is outside [0,1]')
+    end if
+#endif
+  end subroutine euler_idp_device_check_limiter_status
+
+  !> Reduce candidate admissibility to nine host scalars.
+  subroutine euler_idp_device_reduce_validation(this, gamma, summary)
+    class(euler_idp_device_t), intent(inout) :: this
+    real(kind=rp), intent(in) :: gamma
+    real(kind=rp), intent(out) :: summary(EULER_IDP_DEVICE_VALIDATION_SIZE)
+    real(kind=rp) :: local_maximum(5), global_maximum(5)
+    real(kind=rp) :: local_minimum(4), global_minimum(4)
+    integer :: ierr, limit_entropy, n
+
+#ifdef HAVE_CUDA
+    n = this%low_candidate(1)%size()
+    limit_entropy = merge(1, 0, this%limit_entropy)
+    call cuda_euler_idp_validation_summary(this%low_candidate(1)%x_d, &
+         this%low_candidate(2)%x_d, this%low_candidate(3)%x_d, &
+         this%low_candidate(4)%x_d, this%low_candidate(5)%x_d, &
+         this%density_lower_bound%x_d, this%density_upper_bound%x_d, &
+         this%entropy_lower_bound%x_d, this%diagnostic_summary_d, gamma, &
+         limit_entropy, n)
+    call device_memcpy(this%diagnostic_summary, &
+         this%diagnostic_summary_d, EULER_IDP_DEVICE_VALIDATION_SIZE, &
+         DEVICE_TO_HOST, sync = .true.)
+    local_maximum = [this%diagnostic_summary(1:3), &
+         this%diagnostic_summary(8:9)]
+    local_minimum = this%diagnostic_summary(4:7)
+    call MPI_Allreduce(local_maximum, global_maximum, size(local_maximum), &
+         MPI_REAL_PRECISION, MPI_MAX, NEKO_COMM, ierr)
+    call MPI_Allreduce(local_minimum, global_minimum, size(local_minimum), &
+         MPI_REAL_PRECISION, MPI_MIN, NEKO_COMM, ierr)
+    summary(1:3) = global_maximum(1:3)
+    summary(4:7) = global_minimum
+    summary(8:9) = global_maximum(4:5)
+#else
+    summary = 0.0_rp
+#endif
+  end subroutine euler_idp_device_reduce_validation
+
+  !> Reduce a full state observation to four host scalars.
+  subroutine euler_idp_device_reduce_observation(this, observation)
+    class(euler_idp_device_t), intent(inout) :: this
+    type(euler_idp_state_observation_t), intent(inout) :: observation
+    real(kind=rp) :: local_minimum(3), global_minimum(3)
+    real(kind=rp) :: local_maximum, global_maximum
+    integer :: ierr, n
+
+#ifdef HAVE_CUDA
+    n = this%low_candidate(1)%size()
+    call cuda_euler_idp_observation_summary( &
+         this%low_candidate(1)%x_d, this%internal_energy%x_d, &
+         this%p%x_d, this%u%x_d, this%v%x_d, this%w%x_d, &
+         this%sound_speed%x_d, this%diagnostic_summary_d, n)
+    call device_memcpy(this%diagnostic_summary, &
+         this%diagnostic_summary_d, EULER_IDP_DEVICE_OBSERVATION_SIZE, &
+         DEVICE_TO_HOST, sync = .true.)
+    local_minimum = this%diagnostic_summary(1:3)
+    local_maximum = this%diagnostic_summary(4)
+    call MPI_Allreduce(local_minimum, global_minimum, size(local_minimum), &
+         MPI_REAL_PRECISION, MPI_MIN, NEKO_COMM, ierr)
+    call MPI_Allreduce(local_maximum, global_maximum, 1, &
+         MPI_REAL_PRECISION, MPI_MAX, NEKO_COMM, ierr)
+    observation%min_density = global_minimum(1)
+    observation%min_internal_energy = global_minimum(2)
+    observation%min_pressure = global_minimum(3)
+    observation%max_nodal_wave_speed = global_maximum
+#endif
+  end subroutine euler_idp_device_reduce_observation
 
   subroutine euler_idp_device_compute_bounds(this, rho, m_x, m_y, m_z, &
        energy, gs, gamma)
@@ -766,27 +941,20 @@ contains
     class(euler_idp_device_t), intent(inout) :: this
     real(kind=rp), intent(in) :: gamma
     real(kind=rp) :: scale, violation
-    integer :: limit_entropy, n
+    real(kind=rp) :: summary(EULER_IDP_DEVICE_VALIDATION_SIZE)
 
 #ifdef HAVE_CUDA
-    n = this%low_candidate(1)%size()
-    limit_entropy = merge(1, 0, this%limit_entropy)
-    call cuda_euler_idp_validate(this%low_candidate(1)%x_d, &
-         this%low_candidate(2)%x_d, this%low_candidate(3)%x_d, &
-         this%low_candidate(4)%x_d, this%low_candidate(5)%x_d, &
-         this%density_lower_bound%x_d, this%density_upper_bound%x_d, &
-         this%entropy_lower_bound%x_d, this%work_1%x_d, this%work_2%x_d, &
-         this%work_3%x_d, this%sound_speed%x_d, gamma, limit_entropy, n)
-    violation = max(device_glmax(this%work_1%x_d, n), &
-         device_glmax(this%work_2%x_d, n))
-    scale = max(1.0_rp, device_glmax(this%density_upper_bound%x_d, n), &
-         device_glmax(this%low_candidate(1)%x_d, n))
+    call euler_idp_device_reduce_validation(this, gamma, summary)
+    violation = max(summary(1), summary(2))
+    scale = max(1.0_rp, summary(8))
     if (violation .gt. 256.0_rp * epsilon(1.0_rp) * scale) then
        call neko_error('Euler IDP low-order density is outside its bounds')
     end if
-    if (this%limit_entropy .and. &
-         device_glmax(this%work_3%x_d, n) .gt. 0.0_rp) then
+    if (this%limit_entropy .and. summary(3) .gt. 0.0_rp) then
        call neko_error('Euler IDP low-order state violates its entropy bound')
+    end if
+    if (summary(9) .gt. 0.0_rp) then
+       call neko_error('Euler IDP low-order state is not admissible')
     end if
 #endif
   end subroutine euler_idp_device_check_low_bounds
@@ -876,7 +1044,6 @@ contains
     logical, intent(in) :: primitives_valid
     type(euler_idp_state_observation_t), intent(out) :: observation
     type(field_t), intent(in), optional :: graph_wave_speed
-    integer :: n
 
 #ifdef HAVE_CUDA
     if (.not. primitives_valid) then
@@ -885,17 +1052,9 @@ contains
             this%low_candidate(4), this%low_candidate(5), gamma, &
             internal_energy_floor, label)
     end if
-    n = this%low_candidate(1)%size()
     observation = euler_idp_state_observation_t()
     observation%time = time%t
-    observation%min_density = &
-         device_glmin(this%low_candidate(1)%x_d, n)
-    observation%min_internal_energy = &
-         device_glmin(this%internal_energy%x_d, n)
-    observation%min_pressure = device_glmin(this%p%x_d, n)
-    call cuda_euler_idp_nodal_wave(this%u%x_d, this%v%x_d, this%w%x_d, &
-         this%sound_speed%x_d, this%work_1%x_d, n)
-    observation%max_nodal_wave_speed = device_glmax(this%work_1%x_d, n)
+    call euler_idp_device_reduce_observation(this, observation)
     call euler_idp_device_update_graph_viscosity(this, &
          this%low_candidate(1), this%low_candidate(2), &
          this%low_candidate(3), this%low_candidate(4), &
@@ -914,24 +1073,14 @@ contains
     type(euler_idp_diagnostics_t), intent(inout) :: diagnostics
     character(len=*), intent(in) :: label
     real(kind=rp) :: scale
-    integer :: limit_entropy, n
+    real(kind=rp) :: summary(EULER_IDP_DEVICE_VALIDATION_SIZE)
 
     if (this%diagnostics_level .eq. EULER_IDP_DIAGNOSTICS_OFF) return
 #ifdef HAVE_CUDA
-    n = this%low_candidate(1)%size()
-    limit_entropy = merge(1, 0, this%limit_entropy)
-    call cuda_euler_idp_validate(this%low_candidate(1)%x_d, &
-         this%low_candidate(2)%x_d, this%low_candidate(3)%x_d, &
-         this%low_candidate(4)%x_d, this%low_candidate(5)%x_d, &
-         this%density_lower_bound%x_d, this%density_upper_bound%x_d, &
-         this%entropy_lower_bound%x_d, this%work_1%x_d, this%work_2%x_d, &
-         this%work_3%x_d, this%sound_speed%x_d, gamma, limit_entropy, n)
-    diagnostics%max_density_lower_violation = &
-         device_glmax(this%work_1%x_d, n)
-    diagnostics%max_density_upper_violation = &
-         device_glmax(this%work_2%x_d, n)
-    scale = max(1.0_rp, device_glmax(this%density_upper_bound%x_d, n), &
-         device_glmax(this%low_candidate(1)%x_d, n))
+    call euler_idp_device_reduce_validation(this, gamma, summary)
+    diagnostics%max_density_lower_violation = summary(1)
+    diagnostics%max_density_upper_violation = summary(2)
+    scale = max(1.0_rp, summary(8))
     if (max(diagnostics%max_density_lower_violation, &
          diagnostics%max_density_upper_violation) .gt. &
          512.0_rp * epsilon(1.0_rp) * scale) then
@@ -939,19 +1088,20 @@ contains
             ' density violates its local bounds')
     end if
     if (this%limit_entropy) then
-       diagnostics%max_entropy_lower_violation = &
-            device_glmax(this%work_3%x_d, n)
+       diagnostics%max_entropy_lower_violation = summary(3)
        if (diagnostics%max_entropy_lower_violation .gt. 0.0_rp) then
           call neko_error('Euler IDP ' // trim(label) // &
                ' violates its local entropy bound')
        end if
     end if
-    diagnostics%min_density = device_glmin(this%low_candidate(1)%x_d, n)
-    diagnostics%min_internal_energy = &
-         device_glmin(this%internal_energy%x_d, n)
-    diagnostics%min_pressure = device_glmin(this%p%x_d, n)
-    diagnostics%min_specific_entropy = &
-         device_glmin(this%sound_speed%x_d, n)
+    if (summary(9) .gt. 0.0_rp) then
+       call neko_error('Euler IDP ' // trim(label) // &
+            ' contains a non-admissible state')
+    end if
+    diagnostics%min_density = summary(4)
+    diagnostics%min_internal_energy = summary(5)
+    diagnostics%min_pressure = summary(6)
+    diagnostics%min_specific_entropy = summary(7)
 #else
     call neko_error('Euler IDP candidate validation requires CUDA')
 #endif

@@ -147,6 +147,7 @@ def _case(
     internal_energy_floor=NEAR_VACUUM_FLOOR,
     limit_entropy=True,
     time_order=3,
+    diagnostics_level="full",
 ):
     """Build a short, output-free Euler IDP case."""
     output_dir = runtime["directory"] / (
@@ -179,7 +180,7 @@ def _case(
                     "limit_internal_energy": True,
                     "limit_entropy": limit_entropy,
                     "internal_energy_floor": internal_energy_floor,
-                    "diagnostics_level": "full",
+                    "diagnostics_level": diagnostics_level,
                     "diagnostics_interval": 1,
                 },
             },
@@ -269,6 +270,9 @@ def _run_case(
     internal_energy_floor=NEAR_VACUUM_FLOOR,
     limit_entropy=True,
     time_order=3,
+    diagnostics_level="full",
+    case_label=None,
+    record_parity=True,
 ):
     """Write, run, and parse one generated Euler IDP case."""
     case_data = _case(
@@ -283,14 +287,20 @@ def _run_case(
         internal_energy_floor,
         limit_entropy,
         time_order,
+        diagnostics_level,
     )
+    label = case_label or problem
     suffix = (
-        f"{problem}_p{polynomial_order}_r{time_order}_n{mpi_ranks}"
+        f"{label}_p{polynomial_order}_r{time_order}_n{mpi_ranks}"
     )
     case_file = runtime["directory"] / f"{suffix}.case"
     case_file.write_text(json.dumps(case_data, indent=2) + "\n")
 
-    log_path = Path(log_file).with_name(f"{suffix}.log")
+    log_directory = Path(log_file).parent
+    if not record_parity:
+        log_directory = log_directory / "diagnostics"
+        log_directory.mkdir(exist_ok=True)
+    log_path = log_directory / f"{suffix}.log"
     command = [
         str(_resolve_executable(launcher_script)),
         str(mpi_ranks),
@@ -401,53 +411,164 @@ def _tolerances():
     }
 
 
+def _rank_sequence():
+    """Run one rank first and add two ranks whenever MPI permits it."""
+    return (1, 2) if configure_nprocs(2) >= 2 else (1,)
+
+
+def _assert_rank_invariant(runs, keys):
+    """Compare diagnostics from the one- and two-rank executions."""
+    if 1 not in runs or 2 not in runs:
+        return
+    tolerance = _tolerances()
+    for key in keys:
+        if key == "limiter_counts":
+            np.testing.assert_array_equal(
+                runs[1][key],
+                runs[2][key],
+                err_msg="1-rank and 2-rank limiter counts differ",
+            )
+            continue
+        relative_tolerance = tolerance["rank_rtol"]
+        absolute_tolerance = tolerance["rank_atol"]
+        if key == "limiter_stats":
+            relative_tolerance = tolerance["stat_rtol"]
+            absolute_tolerance = tolerance["stat_atol"]
+        np.testing.assert_allclose(
+            runs[1][key],
+            runs[2][key],
+            rtol=relative_tolerance,
+            atol=absolute_tolerance,
+            err_msg=f"1-rank and 2-rank {key} diagnostics differ",
+        )
+
+
+@pytest.mark.parametrize("time_order", (1, 3))
+def test_idp_diagnostics_levels(
+    launcher_script, log_file, euler_idp_runtime, time_order
+):
+    """Diagnostics modes preserve the solution and expose only requested data."""
+    for diagnostics_level in ("off", "safety", "full"):
+        for mpi_ranks in _rank_sequence():
+            summary = _run_case(
+                launcher_script,
+                log_file,
+                euler_idp_runtime,
+                "periodic_discontinuity",
+                polynomial_order=3,
+                steps=2,
+                timestep=1.0e-4,
+                mpi_ranks=mpi_ranks,
+                time_order=time_order,
+                diagnostics_level=diagnostics_level,
+                case_label=f"diagnostics_{diagnostics_level}",
+                record_parity=diagnostics_level == "full",
+            )
+            assert np.min(summary["state"][[2, 3]]) > 0.0
+            if diagnostics_level == "off":
+                assert summary["state"][0] > 1.0e100
+            else:
+                assert 0.0 < summary["state"][0] < 1.0e100
+            if diagnostics_level == "full":
+                assert summary["limiter"][1] > 0.0
+            else:
+                np.testing.assert_array_equal(
+                    summary["limiter_stats"], [1.0, 1.0, 1.0, 0.0]
+                )
+                np.testing.assert_array_equal(
+                    summary["entropy_blend"], [0.0, 0.0]
+                )
+                np.testing.assert_array_equal(
+                    summary["correction"], np.zeros(10)
+                )
+
+
 @pytest.mark.parametrize("time_order", (1, 3))
 def test_idp_free_stream(
     launcher_script, log_file, euler_idp_runtime, time_order
 ):
     """A uniform periodic Euler state stays constant to roundoff."""
-    summary = _run_case(
-        launcher_script,
-        log_file,
-        euler_idp_runtime,
-        "free_stream",
-        polynomial_order=4,
-        steps=12,
-        timestep=2.0e-4,
-        time_order=time_order,
-    )
-    tolerance = _tolerances()
-
-    assert np.max(summary["errors"]) <= tolerance["roundoff"]
-    assert np.max(summary["drifts"]) <= tolerance["conservation"]
-    assert summary["limiter"][1] == 0.0
-    assert math.isclose(
-        summary["limiter"][0], 1.0, abs_tol=tolerance["roundoff"]
-    )
-
-
-def test_idp_smooth_transport(launcher_script, log_file, euler_idp_runtime):
-    """The periodic density wave converges under p-refinement."""
     tolerance = _tolerances()
     runs = {}
-    for polynomial_order in (2, 4):
-        runs[polynomial_order] = _run_case(
+    for mpi_ranks in _rank_sequence():
+        summary = _run_case(
             launcher_script,
             log_file,
             euler_idp_runtime,
-            "smooth_transport",
-            polynomial_order=polynomial_order,
-            steps=100,
-            timestep=5.0e-4,
+            "free_stream",
+            polynomial_order=4,
+            steps=12,
+            timestep=2.0e-4,
+            mpi_ranks=mpi_ranks,
+            time_order=time_order,
         )
-        summary = runs[polynomial_order]
-        assert np.min(summary["state"][[0, 2]]) > 0.0
-        assert np.min(summary["state"][[1, 3]]) >= NEAR_VACUUM_FLOOR
-        assert np.max(summary["bounds"]) <= tolerance["bounds"]
-        assert summary["limiter"][2] <= 1.0 + GRAPH_CFL_TOL
+        assert np.max(summary["errors"]) <= tolerance["roundoff"]
+        assert np.max(summary["drifts"]) <= tolerance["conservation"]
+        assert summary["limiter"][1] == 0.0
+        assert math.isclose(
+            summary["limiter"][0], 1.0, abs_tol=tolerance["roundoff"]
+        )
+        runs[mpi_ranks] = summary
+    _assert_rank_invariant(
+        runs,
+        (
+            "errors",
+            "drifts",
+            "limiter",
+            "state",
+            "stage_conservation",
+            "correction",
+        ),
+    )
 
-    assert np.max(runs[4]["errors"]) < np.max(runs[2]["errors"])
-    assert runs[4]["errors"][0] < runs[2]["errors"][0]
+
+@pytest.mark.parametrize("time_order", (1, 3))
+def test_idp_smooth_transport(
+    launcher_script, log_file, euler_idp_runtime, time_order
+):
+    """The periodic density wave converges under p-refinement."""
+    tolerance = _tolerances()
+    rank_runs = {}
+    for mpi_ranks in _rank_sequence():
+        runs = {}
+        for polynomial_order in (2, 4):
+            runs[polynomial_order] = _run_case(
+                launcher_script,
+                log_file,
+                euler_idp_runtime,
+                "smooth_transport",
+                polynomial_order=polynomial_order,
+                steps=100,
+                timestep=5.0e-4,
+                mpi_ranks=mpi_ranks,
+                time_order=time_order,
+            )
+            summary = runs[polynomial_order]
+            assert np.min(summary["state"][[0, 2]]) > 0.0
+            assert np.min(summary["state"][[1, 3]]) >= NEAR_VACUUM_FLOOR
+            assert np.max(summary["bounds"]) <= tolerance["bounds"]
+            assert summary["limiter"][2] <= 1.0 + GRAPH_CFL_TOL
+
+        assert np.max(runs[4]["errors"]) < np.max(runs[2]["errors"])
+        assert runs[4]["errors"][0] < runs[2]["errors"][0]
+        rank_runs[mpi_ranks] = runs
+    if 1 in rank_runs and 2 in rank_runs:
+        for polynomial_order in (2, 4):
+            _assert_rank_invariant(
+                {
+                    1: rank_runs[1][polynomial_order],
+                    2: rank_runs[2][polynomial_order],
+                },
+                (
+                    "errors",
+                    "drifts",
+                    "limiter",
+                    "state",
+                    "bounds",
+                    "stage_conservation",
+                    "correction",
+                ),
+            )
 
 
 @pytest.mark.parametrize("time_order", (1, 3))
@@ -455,36 +576,52 @@ def test_idp_periodic_discontinuity_activates_limiter(
     launcher_script, log_file, euler_idp_runtime, time_order
 ):
     """A periodic pair of Sod jumps activates the limiter without drift."""
-    summary = _run_case(
-        launcher_script,
-        log_file,
-        euler_idp_runtime,
-        "periodic_discontinuity",
-        polynomial_order=4,
-        steps=12,
-        timestep=1.0e-4,
-        time_order=time_order,
-    )
     tolerance = _tolerances()
+    runs = {}
+    for mpi_ranks in _rank_sequence():
+        summary = _run_case(
+            launcher_script,
+            log_file,
+            euler_idp_runtime,
+            "periodic_discontinuity",
+            polynomial_order=4,
+            steps=12,
+            timestep=1.0e-4,
+            mpi_ranks=mpi_ranks,
+            time_order=time_order,
+        )
+        assert summary["limiter"][1] > 0.0
+        assert summary["limiter"][0] < 1.0
+        assert np.min(summary["state"][[0, 2]]) > 0.0
+        assert np.min(summary["state"][[1, 3]]) >= NEAR_VACUUM_FLOOR
+        assert np.max(summary["bounds"]) <= tolerance["bounds"]
+        assert np.max(summary["drifts"]) <= tolerance["conservation"]
+        runs[mpi_ranks] = summary
+    _assert_rank_invariant(
+        runs,
+        (
+            "drifts",
+            "limiter",
+            "limiter_stats",
+            "limiter_counts",
+            "entropy_blend",
+            "state",
+            "bounds",
+            "stage_conservation",
+            "correction",
+        ),
+    )
 
-    assert summary["limiter"][1] > 0.0
-    assert summary["limiter"][0] < 1.0
-    assert np.min(summary["state"][[0, 2]]) > 0.0
-    assert np.min(summary["state"][[1, 3]]) >= NEAR_VACUUM_FLOOR
-    assert np.max(summary["bounds"]) <= tolerance["bounds"]
-    assert np.max(summary["drifts"]) <= tolerance["conservation"]
 
-
+@pytest.mark.parametrize("time_order", (1, 3))
 def test_idp_near_vacuum_evolution(
-    launcher_script, log_file, euler_idp_runtime
+    launcher_script, log_file, euler_idp_runtime, time_order
 ):
     """Leblanc-type data evolves safely and has rank-invariant diagnostics."""
-    if configure_nprocs(2) < 2:
-        pytest.skip("This test requires two MPI ranks")
     assert NEAR_VACUUM_FLOOR < 1.0e-10
 
-    runs = []
-    for mpi_ranks in (1, 2):
+    runs = {}
+    for mpi_ranks in _rank_sequence():
         summary = _run_case(
             launcher_script,
             log_file,
@@ -495,49 +632,33 @@ def test_idp_near_vacuum_evolution(
             timestep=1.0e-4,
             mpi_ranks=mpi_ranks,
             gamma=5.0 / 3.0,
+            time_order=time_order,
         )
         assert summary["stage_count"] > 3
         assert np.min(summary["state"][[0, 2]]) > 0.0
         assert np.min(summary["state"][[1, 3]]) >= NEAR_VACUUM_FLOOR
         assert summary["limiter"][2] <= 1.0 + GRAPH_CFL_TOL
-        runs.append(summary)
+        runs[mpi_ranks] = summary
 
-    tolerance = _tolerances()
-    diagnostic_keys = (
-        "drifts",
-        "limiter",
-        "limiter_stats",
-        "limiter_counts",
-        "entropy_blend",
-        "state",
-        "bounds",
-        "stage_conservation",
-        "correction",
+    _assert_rank_invariant(
+        runs,
+        (
+            "drifts",
+            "limiter",
+            "limiter_stats",
+            "limiter_counts",
+            "entropy_blend",
+            "state",
+            "bounds",
+            "stage_conservation",
+            "correction",
+        ),
     )
-    for key in diagnostic_keys:
-        if key == "limiter_counts":
-            np.testing.assert_array_equal(
-                runs[0][key],
-                runs[1][key],
-                err_msg="1-rank and 2-rank limiter counts differ",
-            )
-            continue
-        relative_tolerance = tolerance["rank_rtol"]
-        absolute_tolerance = tolerance["rank_atol"]
-        if key == "limiter_stats":
-            relative_tolerance = tolerance["stat_rtol"]
-            absolute_tolerance = tolerance["stat_atol"]
-        np.testing.assert_allclose(
-            runs[0][key],
-            runs[1][key],
-            rtol=relative_tolerance,
-            atol=absolute_tolerance,
-            err_msg=f"1-rank and 2-rank {key} diagnostics differ",
-        )
 
 
+@pytest.mark.parametrize("time_order", (1, 3))
 def test_idp_rejects_unsupported_gamma(
-    launcher_script, log_file, euler_idp_runtime
+    launcher_script, log_file, euler_idp_runtime, time_order
 ):
     """The IDP wave-speed guarantee is restricted to gamma <= 5/3."""
     with pytest.raises(
@@ -553,6 +674,7 @@ def test_idp_rejects_unsupported_gamma(
             steps=1,
             timestep=1.0e-4,
             gamma=1.8,
+            time_order=time_order,
         )
 
 
@@ -560,46 +682,80 @@ def test_idp_rejects_unsupported_gamma(
     "boundary_type",
     ("prescribed", "symmetry", "slip", "outflow", "normal_outflow"),
 )
+@pytest.mark.parametrize("time_order", (1, 3))
 def test_idp_boundary_map_contracts(
-    launcher_script, log_file, euler_idp_runtime, boundary_type
+    launcher_script, log_file, euler_idp_runtime, boundary_type, time_order
 ):
     """Each supported Euler boundary map preserves its primitive contract."""
-    summary = _run_case(
-        launcher_script,
-        log_file,
-        euler_idp_runtime,
-        f"boundary_{boundary_type}",
-        polynomial_order=3,
-        steps=2,
-        timestep=1.0e-6,
-        mesh=euler_idp_runtime["bounded_x_mesh"],
-        boundary_conditions=_primitive_boundary_conditions(boundary_type),
+    runs = {}
+    for mpi_ranks in _rank_sequence():
+        summary = _run_case(
+            launcher_script,
+            log_file,
+            euler_idp_runtime,
+            f"boundary_{boundary_type}",
+            polynomial_order=3,
+            steps=2,
+            timestep=1.0e-6,
+            mpi_ranks=mpi_ranks,
+            mesh=euler_idp_runtime["bounded_x_mesh"],
+            boundary_conditions=_primitive_boundary_conditions(boundary_type),
+            time_order=time_order,
+        )
+        _assert_boundary_contract(summary)
+        runs[mpi_ranks] = summary
+    _assert_rank_invariant(
+        runs,
+        (
+            "limiter",
+            "state",
+            "bounds",
+            "stage_conservation",
+            "correction",
+            "boundary",
+        ),
     )
-    _assert_boundary_contract(summary)
 
 
+@pytest.mark.parametrize("time_order", (1, 3))
 def test_idp_outflow_respects_internal_energy_floor(
-    launcher_script, log_file, euler_idp_runtime
+    launcher_script, log_file, euler_idp_runtime, time_order
 ):
     """Pressure reconstruction honors a configured floor above 1e-12."""
     floor = 1.0e-8
-    summary = _run_case(
-        launcher_script,
-        log_file,
-        euler_idp_runtime,
-        "boundary_outflow_floor",
-        polynomial_order=3,
-        steps=2,
-        timestep=1.0e-6,
-        mesh=euler_idp_runtime["bounded_x_mesh"],
-        boundary_conditions=_primitive_boundary_conditions("outflow"),
-        internal_energy_floor=floor,
+    runs = {}
+    for mpi_ranks in _rank_sequence():
+        summary = _run_case(
+            launcher_script,
+            log_file,
+            euler_idp_runtime,
+            "boundary_outflow_floor",
+            polynomial_order=3,
+            steps=2,
+            timestep=1.0e-6,
+            mpi_ranks=mpi_ranks,
+            mesh=euler_idp_runtime["bounded_x_mesh"],
+            boundary_conditions=_primitive_boundary_conditions("outflow"),
+            internal_energy_floor=floor,
+            time_order=time_order,
+        )
+        _assert_boundary_contract(summary, floor=floor)
+        runs[mpi_ranks] = summary
+    _assert_rank_invariant(
+        runs,
+        (
+            "limiter",
+            "state",
+            "bounds",
+            "stage_conservation",
+            "boundary",
+        ),
     )
-    _assert_boundary_contract(summary, floor=floor)
 
 
+@pytest.mark.parametrize("time_order", (1, 3))
 def test_idp_rejects_nonpositive_prescribed_boundary_density(
-    launcher_script, log_file, euler_idp_runtime
+    launcher_script, log_file, euler_idp_runtime, time_order
 ):
     """An inadmissible prescribed primitive state fails at the boundary map."""
     with pytest.raises(AssertionError, match=r"Euler IDP.*density"):
@@ -615,16 +771,15 @@ def test_idp_rejects_nonpositive_prescribed_boundary_density(
             boundary_conditions=_primitive_boundary_conditions(
                 "prescribed", density=-1.0
             ),
+            time_order=time_order,
         )
 
 
+@pytest.mark.parametrize("time_order", (1, 3))
 def test_idp_mixed_boundaries_are_rank_invariant(
-    launcher_script, log_file, euler_idp_runtime
+    launcher_script, log_file, euler_idp_runtime, time_order
 ):
-    """Inlet, slip walls, and outflow compose through SSPRK3 on 1/2 ranks."""
-    if configure_nprocs(2) < 2:
-        pytest.skip("This test requires two MPI ranks")
-
+    """Inlet, slip walls, and outflow compose on one and two ranks."""
     boundary_conditions = [
         {
             "type": "velocity_value",
@@ -636,8 +791,8 @@ def test_idp_mixed_boundaries_are_rank_invariant(
         {"type": "outflow", "zone_indices": [2]},
         {"type": "slip", "zone_indices": [3, 4]},
     ]
-    runs = []
-    for mpi_ranks in (1, 2):
+    runs = {}
+    for mpi_ranks in _rank_sequence():
         summary = _run_case(
             launcher_script,
             log_file,
@@ -650,22 +805,18 @@ def test_idp_mixed_boundaries_are_rank_invariant(
             mesh=euler_idp_runtime["bounded_xy_mesh"],
             boundary_conditions=boundary_conditions,
             limit_entropy=False,
+            time_order=time_order,
         )
         _assert_boundary_contract(summary)
-        runs.append(summary)
+        runs[mpi_ranks] = summary
 
-    tolerance = _tolerances()
-    for key in (
-        "limiter",
-        "state",
-        "bounds",
-        "stage_conservation",
-        "boundary",
-    ):
-        np.testing.assert_allclose(
-            runs[0][key],
-            runs[1][key],
-            rtol=tolerance["rank_rtol"],
-            atol=tolerance["rank_atol"],
-            err_msg=f"1-rank and 2-rank {key} diagnostics differ",
-        )
+    _assert_rank_invariant(
+        runs,
+        (
+            "limiter",
+            "state",
+            "bounds",
+            "stage_conservation",
+            "boundary",
+        ),
+    )
