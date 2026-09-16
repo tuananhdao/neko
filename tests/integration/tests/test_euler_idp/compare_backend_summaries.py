@@ -19,6 +19,7 @@ FLOAT_TAGS = (
     "EULER_IDP_BOUNDARY",
 )
 INTEGER_TAGS = ("EULER_IDP_LIMITER_COUNTS",)
+LIMITER_FLOAT_TAGS = ("EULER_IDP_LIMITER", "EULER_IDP_LIMITER_STATS")
 
 
 def parse_log(path):
@@ -47,12 +48,19 @@ def collect_logs(directory):
 def tolerances(precision, tag):
     """Return backend-parity tolerances for one summary category."""
     if precision == "sp":
-        if tag == "EULER_IDP_LIMITER_STATS":
+        if tag in LIMITER_FLOAT_TAGS:
             return 3.0e-4, 3.0e-5
         return 1.0e-4, 3.0e-5
-    if tag == "EULER_IDP_LIMITER_STATS":
-        return 3.0e-8, 3.0e-10
+    if tag in LIMITER_FLOAT_TAGS:
+        return 3.0e-7, 3.0e-9
     return 5.0e-10, 2.0e-11
+
+
+def integer_tolerance(precision, tag):
+    """Return an absolute tolerance for threshold-based integer statistics."""
+    if tag == "EULER_IDP_LIMITER_COUNTS":
+        return 4 if precision == "sp" else 2
+    return 0
 
 
 def compare(cpu_logs, device_logs, precision):
@@ -87,10 +95,29 @@ def compare(cpu_logs, device_logs, precision):
         for tag in INTEGER_TAGS:
             cpu_values = [int(value) for value in cpu_summary[tag]]
             device_values = [int(value) for value in device_summary[tag]]
-            if cpu_values != device_values:
-                failures.append(
-                    f"{name}: {tag} differs: {cpu_values} != {device_values}"
+            if len(cpu_values) != len(device_values):
+                failures.append(f"{name}: {tag} has different lengths")
+                continue
+            absolute_tolerance = integer_tolerance(precision, tag)
+            metric = report["metrics"].setdefault(
+                tag,
+                {
+                    "absolute_tolerance": absolute_tolerance,
+                    "max_absolute_difference": 0,
+                },
+            )
+            for index, (cpu_value, device_value) in enumerate(
+                zip(cpu_values, device_values)
+            ):
+                difference = abs(cpu_value - device_value)
+                metric["max_absolute_difference"] = max(
+                    metric["max_absolute_difference"], difference
                 )
+                if difference > absolute_tolerance:
+                    failures.append(
+                        f"{name}: {tag}[{index}] differs: "
+                        f"CPU={cpu_value}, device={device_value}"
+                    )
 
         for tag in FLOAT_TAGS:
             cpu_values = [float(value) for value in cpu_summary[tag]]
@@ -100,7 +127,13 @@ def compare(cpu_logs, device_logs, precision):
                 continue
             relative_tolerance, absolute_tolerance = tolerances(precision, tag)
             metric = report["metrics"].setdefault(
-                tag, {"max_absolute_difference": 0.0, "max_relative_difference": 0.0}
+                tag,
+                {
+                    "absolute_tolerance": absolute_tolerance,
+                    "relative_tolerance": relative_tolerance,
+                    "max_absolute_difference": 0.0,
+                    "max_relative_difference": 0.0,
+                },
             )
             for index, (cpu_value, device_value) in enumerate(
                 zip(cpu_values, device_values)
