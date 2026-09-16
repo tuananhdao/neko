@@ -17,7 +17,6 @@ from testlib import configure_nprocs, get_genmeshbox, get_makeneko
 
 HERE = Path(__file__).resolve().parent
 USER_FILE = HERE / "euler_idp_integration.f90"
-N_STAGES = 3
 GRAPH_CFL_TOL = 5.0e-6
 NEAR_VACUUM_FLOOR = 1.0e-12
 
@@ -143,10 +142,11 @@ def _case(
     boundary_conditions=None,
     internal_energy_floor=NEAR_VACUUM_FLOOR,
     limit_entropy=True,
+    time_order=3,
 ):
-    """Build a short, output-free SSPRK3 case."""
+    """Build a short, output-free Euler IDP case."""
     output_dir = runtime["directory"] / (
-        f"output_{problem}_p{polynomial_order}"
+        f"output_{problem}_p{polynomial_order}_r{time_order}"
     )
     output_dir.mkdir(exist_ok=True)
     case_data = {
@@ -164,7 +164,7 @@ def _case(
                 "variable_timestep": False,
             },
             "numerics": {
-                "time_order": 3,
+                "time_order": time_order,
                 "polynomial_order": polynomial_order,
                 "c_avisc_low": 0.5,
                 "c_avisc_entropy": 1.0,
@@ -250,6 +250,7 @@ def _run_case(
     boundary_conditions=None,
     internal_energy_floor=NEAR_VACUUM_FLOOR,
     limit_entropy=True,
+    time_order=3,
 ):
     """Write, run, and parse one generated Euler IDP case."""
     case_data = _case(
@@ -263,8 +264,11 @@ def _run_case(
         boundary_conditions,
         internal_energy_floor,
         limit_entropy,
+        time_order,
     )
-    suffix = f"{problem}_p{polynomial_order}_n{mpi_ranks}"
+    suffix = (
+        f"{problem}_p{polynomial_order}_r{time_order}_n{mpi_ranks}"
+    )
     case_file = runtime["directory"] / f"{suffix}.case"
     case_file.write_text(json.dumps(case_data, indent=2) + "\n")
 
@@ -292,7 +296,7 @@ def _run_case(
     assert summary["polynomial_order"] == polynomial_order
     assert summary["mpi_ranks"] == mpi_ranks
     assert summary["steps"] == steps
-    assert summary["stage_count"] == N_STAGES * steps
+    assert summary["stage_count"] == time_order * steps
     assert summary["finite"]
     for key in (
         "errors",
@@ -358,8 +362,10 @@ def _tolerances():
     }
 
 
-@pytest.mark.skipif(conftest.USES_DEVICE, reason="Euler IDP is CPU-only")
-def test_idp_free_stream(launcher_script, log_file, euler_idp_runtime):
+@pytest.mark.parametrize("time_order", (1, 3))
+def test_idp_free_stream(
+    launcher_script, log_file, euler_idp_runtime, time_order
+):
     """A uniform periodic Euler state stays constant to roundoff."""
     summary = _run_case(
         launcher_script,
@@ -369,6 +375,7 @@ def test_idp_free_stream(launcher_script, log_file, euler_idp_runtime):
         polynomial_order=4,
         steps=12,
         timestep=2.0e-4,
+        time_order=time_order,
     )
     tolerance = _tolerances()
 
@@ -380,7 +387,6 @@ def test_idp_free_stream(launcher_script, log_file, euler_idp_runtime):
     )
 
 
-@pytest.mark.skipif(conftest.USES_DEVICE, reason="Euler IDP is CPU-only")
 def test_idp_smooth_transport(launcher_script, log_file, euler_idp_runtime):
     """The periodic density wave converges under p-refinement."""
     tolerance = _tolerances()
@@ -405,9 +411,9 @@ def test_idp_smooth_transport(launcher_script, log_file, euler_idp_runtime):
     assert runs[4]["errors"][0] < runs[2]["errors"][0]
 
 
-@pytest.mark.skipif(conftest.USES_DEVICE, reason="Euler IDP is CPU-only")
+@pytest.mark.parametrize("time_order", (1, 3))
 def test_idp_periodic_discontinuity_activates_limiter(
-    launcher_script, log_file, euler_idp_runtime
+    launcher_script, log_file, euler_idp_runtime, time_order
 ):
     """A periodic pair of Sod jumps activates the limiter without drift."""
     summary = _run_case(
@@ -418,6 +424,7 @@ def test_idp_periodic_discontinuity_activates_limiter(
         polynomial_order=4,
         steps=12,
         timestep=1.0e-4,
+        time_order=time_order,
     )
     tolerance = _tolerances()
 
@@ -429,7 +436,6 @@ def test_idp_periodic_discontinuity_activates_limiter(
     assert np.max(summary["drifts"]) <= tolerance["conservation"]
 
 
-@pytest.mark.skipif(conftest.USES_DEVICE, reason="Euler IDP is CPU-only")
 def test_idp_near_vacuum_evolution(
     launcher_script, log_file, euler_idp_runtime
 ):
@@ -451,7 +457,7 @@ def test_idp_near_vacuum_evolution(
             mpi_ranks=mpi_ranks,
             gamma=5.0 / 3.0,
         )
-        assert summary["stage_count"] > N_STAGES
+        assert summary["stage_count"] > 3
         assert np.min(summary["state"][[0, 2]]) > 0.0
         assert np.min(summary["state"][[1, 3]]) >= NEAR_VACUUM_FLOOR
         assert summary["limiter"][2] <= 1.0 + GRAPH_CFL_TOL
@@ -475,7 +481,6 @@ def test_idp_near_vacuum_evolution(
         )
 
 
-@pytest.mark.skipif(conftest.USES_DEVICE, reason="Euler IDP is CPU-only")
 def test_idp_rejects_unsupported_gamma(
     launcher_script, log_file, euler_idp_runtime
 ):
@@ -496,7 +501,6 @@ def test_idp_rejects_unsupported_gamma(
         )
 
 
-@pytest.mark.skipif(conftest.USES_DEVICE, reason="Euler IDP is CPU-only")
 @pytest.mark.parametrize(
     "boundary_type",
     ("prescribed", "symmetry", "slip", "outflow", "normal_outflow"),
@@ -519,7 +523,6 @@ def test_idp_boundary_map_contracts(
     _assert_boundary_contract(summary)
 
 
-@pytest.mark.skipif(conftest.USES_DEVICE, reason="Euler IDP is CPU-only")
 def test_idp_outflow_respects_internal_energy_floor(
     launcher_script, log_file, euler_idp_runtime
 ):
@@ -540,7 +543,6 @@ def test_idp_outflow_respects_internal_energy_floor(
     _assert_boundary_contract(summary, floor=floor)
 
 
-@pytest.mark.skipif(conftest.USES_DEVICE, reason="Euler IDP is CPU-only")
 def test_idp_rejects_nonpositive_prescribed_boundary_density(
     launcher_script, log_file, euler_idp_runtime
 ):
@@ -561,7 +563,6 @@ def test_idp_rejects_nonpositive_prescribed_boundary_density(
         )
 
 
-@pytest.mark.skipif(conftest.USES_DEVICE, reason="Euler IDP is CPU-only")
 def test_idp_mixed_boundaries_are_rank_invariant(
     launcher_script, log_file, euler_idp_runtime
 ):

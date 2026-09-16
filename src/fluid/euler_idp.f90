@@ -46,6 +46,8 @@ module euler_idp
        euler_idp_state_observation_t, euler_idp_diagnostics_t, &
        euler_idp_stage_time
   use euler_idp_cpu, only : euler_idp_cpu_t
+  use euler_idp_device, only : euler_idp_device_t
+  use neko_config, only : NEKO_BCKND_DEVICE
   use utils, only : neko_error
   implicit none
   private
@@ -217,7 +219,11 @@ contains
     call this%free()
     call this%validate_setup(config, time_order)
 
-    allocate(euler_idp_cpu_t :: this%backend)
+    if (NEKO_BCKND_DEVICE .eq. 1) then
+       allocate(euler_idp_device_t :: this%backend)
+    else
+       allocate(euler_idp_cpu_t :: this%backend)
+    end if
     call this%backend%init(dof)
     call this%backend%init_graph(coef, gs, config%relax_density_bounds, &
          config%low_order_only, config%limit_internal_energy, &
@@ -443,6 +449,8 @@ contains
             this%config%internal_energy_floor, time, &
             'candidate before boundary conditions', &
             .false., diagnostics%before_boundary, graph_wave_speed)
+       call this%backend%validate_candidate(gamma, diagnostics, &
+            'limited candidate before boundary conditions')
     end if
     call this%backend%apply_candidate_boundary(density_bcs, velocity_bcs, &
          pressure_bcs, gamma, this%config%internal_energy_floor, time, &
@@ -453,7 +461,8 @@ contains
             'candidate after boundary conditions', .true., &
             diagnostics%after_boundary, graph_wave_speed)
     end if
-    call this%backend%validate_candidate(gamma, diagnostics)
+    call this%backend%validate_candidate(gamma, diagnostics, &
+         'limited candidate after boundary conditions')
   end subroutine euler_idp_forward_euler_stage
 
   !> Apply the strong boundary map without changing graph topology.

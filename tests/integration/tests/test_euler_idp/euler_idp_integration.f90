@@ -3,6 +3,7 @@ module user
   use, intrinsic :: ieee_arithmetic, only : ieee_is_finite
   use neko
   use comm, only : NEKO_COMM, MPI_REAL_PRECISION
+  use device, only : HOST_TO_DEVICE, DEVICE_TO_HOST
   use fluid_scheme_compressible_ns, only : fluid_scheme_compressible_ns_t
   use mpi_f08, only : MPI_Allreduce, MPI_MAX, MPI_MIN
   implicit none
@@ -157,6 +158,12 @@ contains
     m_z => neko_registry%get_field('m_z')
     energy => neko_registry%get_field('E')
 
+    call rho%copy_from(DEVICE_TO_HOST, sync = .false.)
+    call m_x%copy_from(DEVICE_TO_HOST, sync = .false.)
+    call m_y%copy_from(DEVICE_TO_HOST, sync = .false.)
+    call m_z%copy_from(DEVICE_TO_HOST, sync = .false.)
+    call energy%copy_from(DEVICE_TO_HOST, sync = .true.)
+
     initial_integrals(1) = glsc2(rho%x, coef%B, rho%size())
     initial_integrals(2) = glsc2(m_x%x, coef%B, rho%size())
     initial_integrals(3) = glsc2(m_y%x, coef%B, rho%size())
@@ -201,11 +208,21 @@ contains
        m_y%x = density * velocity(2)
        m_z%x = density * velocity(3)
        energy%x = total_energy
+       call rho%copy_from(HOST_TO_DEVICE, sync = .false.)
+       call m_x%copy_from(HOST_TO_DEVICE, sync = .false.)
+       call m_y%copy_from(HOST_TO_DEVICE, sync = .false.)
+       call m_z%copy_from(HOST_TO_DEVICE, sync = .false.)
+       call energy%copy_from(HOST_TO_DEVICE, sync = .true.)
 
        call fluid%euler_idp_solver%backend%apply_boundary_conditions( &
             rho, m_x, m_y, m_z, energy, fluid%bcs_density, &
             fluid%bcs_vel, fluid%bcs_prs, gamma_ref, energy_floor, time, &
             'boundary regression probe', refresh = .true.)
+       call rho%copy_from(DEVICE_TO_HOST, sync = .false.)
+       call m_x%copy_from(DEVICE_TO_HOST, sync = .false.)
+       call m_y%copy_from(DEVICE_TO_HOST, sync = .false.)
+       call m_z%copy_from(DEVICE_TO_HOST, sync = .false.)
+       call energy%copy_from(DEVICE_TO_HOST, sync = .true.)
 
        local_errors = 0.0_rp
        local_minimum = huge(1.0_rp)
@@ -241,6 +258,11 @@ contains
             rho, m_x, m_y, m_z, energy, fluid%bcs_density, &
             fluid%bcs_vel, fluid%bcs_prs, gamma_ref, energy_floor, time, &
             'repeated boundary regression probe', refresh = .true.)
+       call rho%copy_from(DEVICE_TO_HOST, sync = .false.)
+       call m_x%copy_from(DEVICE_TO_HOST, sync = .false.)
+       call m_y%copy_from(DEVICE_TO_HOST, sync = .false.)
+       call m_z%copy_from(DEVICE_TO_HOST, sync = .false.)
+       call energy%copy_from(DEVICE_TO_HOST, sync = .true.)
        do i = 1, n
           local_errors(7) = max(local_errors(7), maxval(abs( &
                [rho%x(i, 1, 1, 1), m_x%x(i, 1, 1, 1), &
@@ -321,14 +343,14 @@ contains
     energy = pressure / (gamma_ref - 1.0_rp) + kinetic
   end subroutine expected_boundary_state
 
-  !> Reduce the diagnostics over every SSPRK3 stage and time step.
+  !> Reduce the diagnostics over every active stage and time step.
   subroutine monitor_stages(time)
     type(time_state_t), intent(in) :: time
     integer :: stage
 
     select type (fluid => neko_user_access%case%fluid)
     type is (fluid_scheme_compressible_ns_t)
-       do stage = 1, 3
+       do stage = 1, fluid%euler_idp_solver%time_order
           associate(diagnostic => &
                fluid%euler_idp_solver%stage_diagnostics(stage))
             stage_count = stage_count + 1
@@ -388,6 +410,11 @@ contains
     m_y => neko_registry%get_field('m_y')
     m_z => neko_registry%get_field('m_z')
     energy => neko_registry%get_field('E')
+    call rho%copy_from(DEVICE_TO_HOST, sync = .false.)
+    call m_x%copy_from(DEVICE_TO_HOST, sync = .false.)
+    call m_y%copy_from(DEVICE_TO_HOST, sync = .false.)
+    call m_z%copy_from(DEVICE_TO_HOST, sync = .false.)
+    call energy%copy_from(DEVICE_TO_HOST, sync = .true.)
     n = rho%size()
     allocate(work(n))
 

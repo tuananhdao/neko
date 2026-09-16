@@ -56,7 +56,8 @@ module euler_idp_cpu
        euler_idp_internal_energy, euler_idp_internal_energy_timestep, &
        euler_idp_limit_edge, &
        euler_idp_local_entropy_bounds, euler_idp_relax_density_bounds, &
-       euler_idp_specific_entropy, euler_idp_entropy_tolerance
+       euler_idp_specific_entropy, euler_idp_entropy_tolerance, &
+       euler_idp_entropy_is_admissible
   use euler_gll_graph, only : euler_gll_graph_t
   use comm, only : NEKO_COMM, MPI_REAL_PRECISION, pe_rank
   use utils, only : neko_error
@@ -865,6 +866,22 @@ contains
          .not. this%limit_internal_energy .and. .not. this%limit_entropy
     diagnostics%entropy_viscosity_enabled = &
          present(entropy_viscosity_fraction)
+    if (this%diagnostics_level .eq. EULER_IDP_DIAGNOSTICS_FULL) then
+       this%flux_y%x = m_x%x
+       this%flux_z%x = m_x%x
+       call gs%op(this%flux_y, GS_OP_MIN)
+       call gs%op(this%flux_z, GS_OP_MAX)
+       local_error = maxval(abs(this%flux_z%x - this%flux_y%x))
+       local_scale = max(1.0_rp, maxval(abs(this%flux_z%x)), &
+            maxval(abs(this%flux_y%x)))
+       if (local_error .gt. 512.0_rp * epsilon(1.0_rp) * local_scale) then
+          write(message, '(A,I0,A,I0,A,ES13.6)') &
+               'Euler IDP stage input momentum-x differs across shared ' // &
+               'copies on rank ', pe_rank, ', SSPRK stage ', stage, &
+               ', error ', local_error
+          call neko_error(trim(message))
+       end if
+    end if
     call this%evaluate_low_order(rho, m_x, m_y, m_z, energy, coef, gs, &
          gamma, internal_energy_floor, diagnostics, directional_error_local)
 
@@ -1071,6 +1088,10 @@ contains
     end if
 
     diagnostics%limiter_weight_error = this%limiter_weight_error
+    if (this%diagnostics_level .eq. EULER_IDP_DIAGNOSTICS_FULL) then
+       call this%validate_candidate(gamma, diagnostics, &
+            'low-order candidate before correction')
+    end if
     call this%compute_limiter(gamma, internal_energy_floor, diagnostics)
     call this%apply_correction(gs)
     call profiler_end_region('Euler IDP Forward Euler')
@@ -1086,6 +1107,8 @@ contains
     real(kind=rp) :: right_base(EULER_IDP_NCOMP)
     real(kind=rp) :: left_correction(EULER_IDP_NCOMP)
     real(kind=rp) :: right_correction(EULER_IDP_NCOMP)
+    real(kind=rp) :: left_trial(EULER_IDP_NCOMP)
+    real(kind=rp) :: right_trial(EULER_IDP_NCOMP)
     real(kind=rp) :: left_entropy_bound, right_entropy_bound
     real(kind=rp) :: edge_limit
     real(kind=rp) :: correction_scale, correction_size
@@ -1095,6 +1118,7 @@ contains
     logical :: density_limited, energy_limited, entropy_limited
     logical :: check_base_constraints
     logical :: negligible_correction
+    character(len=2 * LOG_SIZE) :: message
 
     call profiler_start_region('Euler IDP vector limiter')
     local_minimum = 1.0_rp
@@ -1158,6 +1182,27 @@ contains
                  this%limit_internal_energy, this%limit_entropy, &
                  check_base_constraints)
          end if
+         if (this%diagnostics_level .eq. EULER_IDP_DIAGNOSTICS_FULL .and. &
+              this%limit_entropy) then
+            left_trial = left_base + edge_limit * left_correction
+            right_trial = right_base + edge_limit * right_correction
+            if (.not. euler_idp_entropy_is_admissible(left_trial, gamma, &
+                 left_entropy_bound, internal_energy_floor)) then
+               write(message, '(A,I0,A,I0,A,I0)') &
+                    'Euler IDP limiter returned an inadmissible left ' // &
+                    'endpoint on rank ', pe_rank, ', SSPRK stage ', &
+                    diagnostics%stage, ', edge ', edge
+               call neko_error(trim(message))
+            end if
+            if (.not. euler_idp_entropy_is_admissible(right_trial, gamma, &
+                 right_entropy_bound, internal_energy_floor)) then
+               write(message, '(A,I0,A,I0,A,I0)') &
+                    'Euler IDP limiter returned an inadmissible right ' // &
+                    'endpoint on rank ', pe_rank, ', SSPRK stage ', &
+                    diagnostics%stage, ', edge ', edge
+               call neko_error(trim(message))
+            end if
+         end if
        end associate
        if (this%diagnostics_level .ne. EULER_IDP_DIAGNOSTICS_OFF) then
           if (.not. ieee_is_finite(edge_limit) .or. &
@@ -1207,7 +1252,87 @@ contains
   subroutine euler_idp_cpu_apply_correction(this, gs)
     class(euler_idp_cpu_t), intent(inout) :: this
     type(gs_t), intent(inout) :: gs
-    integer :: component
+    real(kind=rp) :: left_weight, right_weight
+    real(kind=rp) :: local_error, local_scale
+    character(len=2 * LOG_SIZE) :: message
+    integer :: component, direction, edge
+
+    if (this%diagnostics_level .eq. EULER_IDP_DIAGNOSTICS_FULL) then
+       do component = 1, EULER_IDP_NCOMP
+          this%flux_y%x = this%low_candidate(component)%x
+          this%flux_z%x = this%low_candidate(component)%x
+          call gs%op(this%flux_y, GS_OP_MIN)
+          call gs%op(this%flux_z, GS_OP_MAX)
+          local_error = maxval(abs(this%flux_z%x - this%flux_y%x))
+          local_scale = max(1.0_rp, maxval(abs(this%flux_z%x)), &
+               maxval(abs(this%flux_y%x)))
+          if (local_error .gt. 512.0_rp * epsilon(1.0_rp) * local_scale) then
+             write(message, '(A,I0,A,I0,A,ES13.6)') &
+                  'Euler IDP low-order base differs across shared copies on ' // &
+                  'rank ', pe_rank, ', component ', component, ', error ', &
+                  local_error
+             call neko_error(trim(message))
+          end if
+       end do
+       this%flux_y%x = 0.0_rp
+       do component = 1, EULER_IDP_NCOMP
+          this%local_residual(component)%x = 0.0_rp
+       end do
+       do edge = 1, this%graph%n_edges
+          associate(a => this%graph%left(:,edge), &
+               b => this%graph%right(:,edge))
+            direction = this%graph%direction(edge)
+            left_weight = 1.0_rp / (real(this%graph%n_directions, rp) * &
+                 this%graph%directional_degree(direction)%x( &
+                 a(1),a(2),a(3),a(4)))
+            right_weight = 1.0_rp / (real(this%graph%n_directions, rp) * &
+                 this%graph%directional_degree(direction)%x( &
+                 b(1),b(2),b(3),b(4)))
+            this%flux_y%x(a(1),a(2),a(3),a(4)) = &
+                 this%flux_y%x(a(1),a(2),a(3),a(4)) + left_weight
+            this%flux_y%x(b(1),b(2),b(3),b(4)) = &
+                 this%flux_y%x(b(1),b(2),b(3),b(4)) + right_weight
+            do component = 1, EULER_IDP_NCOMP
+               this%local_residual(component)%x(a(1),a(2),a(3),a(4)) = &
+                    this%local_residual(component)%x(a(1),a(2),a(3),a(4)) + &
+                    left_weight * this%low_candidate(component)%x( &
+                    a(1),a(2),a(3),a(4)) + &
+                    this%correction_flux(component,edge) / &
+                    this%graph%mass%x(a(1),a(2),a(3),a(4))
+               this%local_residual(component)%x(b(1),b(2),b(3),b(4)) = &
+                    this%local_residual(component)%x(b(1),b(2),b(3),b(4)) + &
+                    right_weight * this%low_candidate(component)%x( &
+                    b(1),b(2),b(3),b(4)) - &
+                    this%correction_flux(component,edge) / &
+                    this%graph%mass%x(b(1),b(2),b(3),b(4))
+            end do
+          end associate
+       end do
+       do component = 1, EULER_IDP_NCOMP
+          call gs%op(this%local_residual(component), GS_OP_ADD)
+       end do
+       call gs%op(this%flux_y, GS_OP_ADD)
+       local_error = maxval(abs(this%flux_y%x - 1.0_rp))
+       if (local_error .gt. 512.0_rp * epsilon(1.0_rp)) then
+          write(message, '(A,I0,A,ES13.6)') &
+               'Euler IDP convex weights changed on rank ', pe_rank, &
+               ', error ', local_error
+          call neko_error(trim(message))
+       end if
+       this%flux_y%x = this%graph%mass%x
+       this%flux_z%x = this%graph%mass%x
+       call gs%op(this%flux_y, GS_OP_MIN)
+       call gs%op(this%flux_z, GS_OP_MAX)
+       local_error = maxval(abs(this%flux_z%x - this%flux_y%x))
+       local_scale = max(1.0_rp, maxval(abs(this%flux_z%x)), &
+            maxval(abs(this%flux_y%x)))
+       if (local_error .gt. 512.0_rp * epsilon(1.0_rp) * local_scale) then
+          write(message, '(A,I0,A,ES13.6)') &
+               'Euler IDP assembled mass differs across shared copies on ' // &
+               'rank ', pe_rank, ', error ', local_error
+          call neko_error(trim(message))
+       end if
+    end if
 
     call profiler_start_region('Euler IDP correction asm')
     do component = 1, EULER_IDP_NCOMP
@@ -1219,6 +1344,22 @@ contains
        this%low_candidate(component)%x = this%low_candidate(component)%x + &
             this%flux_x%x / this%graph%mass%x
     end do
+    if (this%diagnostics_level .eq. EULER_IDP_DIAGNOSTICS_FULL) then
+       do component = 1, EULER_IDP_NCOMP
+          local_error = maxval(abs(this%low_candidate(component)%x - &
+               this%local_residual(component)%x))
+          local_scale = max(1.0_rp, &
+               maxval(abs(this%low_candidate(component)%x)), &
+               maxval(abs(this%local_residual(component)%x)))
+          if (local_error .gt. 512.0_rp * epsilon(1.0_rp) * local_scale) then
+             write(message, '(A,I0,A,I0,A,ES13.6)') &
+                  'Euler IDP direct correction differs from its convex ' // &
+                  'endpoint form on rank ', pe_rank, ', component ', &
+                  component, ', error ', local_error
+             call neko_error(trim(message))
+          end if
+       end do
+    end if
     call profiler_end_region('Euler IDP correction asm')
   end subroutine euler_idp_cpu_apply_correction
 
@@ -1258,16 +1399,20 @@ contains
   end subroutine euler_idp_cpu_apply_candidate_boundary
 
   !> Validate local bounds and record global minima after the boundary map.
-  subroutine euler_idp_cpu_validate_candidate(this, gamma, diagnostics)
+  subroutine euler_idp_cpu_validate_candidate(this, gamma, diagnostics, label)
     class(euler_idp_cpu_t), intent(inout) :: this
     real(kind=rp), intent(in) :: gamma
     type(euler_idp_diagnostics_t), intent(inout) :: diagnostics
+    character(len=*), intent(in) :: label
     real(kind=rp) :: state(EULER_IDP_NCOMP)
     real(kind=rp) :: local_bound_violation(2), local_entropy_violation
     real(kind=rp) :: local_entropy_excess, entropy, entropy_tolerance
+    real(kind=rp) :: worst_entropy, worst_entropy_bound
+    real(kind=rp) :: worst_entropy_tolerance
     real(kind=rp) :: local_minimum(4), global_minimum(4)
     real(kind=rp) :: local_scale
-    integer :: i, ierr
+    character(len=4 * LOG_SIZE) :: message
+    integer :: i, ierr, worst_entropy_node
 
     if (this%diagnostics_level .eq. EULER_IDP_DIAGNOSTICS_OFF) return
 
@@ -1293,6 +1438,10 @@ contains
     if (this%limit_entropy) then
        local_entropy_violation = 0.0_rp
        local_entropy_excess = 0.0_rp
+       worst_entropy_node = 0
+       worst_entropy = huge(1.0_rp)
+       worst_entropy_bound = -huge(1.0_rp)
+       worst_entropy_tolerance = 0.0_rp
        do i = 1, this%low_candidate(1)%size()
           state = [this%low_candidate(1)%x(i,1,1,1), &
                this%low_candidate(2)%x(i,1,1,1), &
@@ -1304,14 +1453,27 @@ contains
                this%entropy_lower_bound%x(i,1,1,1) - entropy)
           entropy_tolerance = euler_idp_entropy_tolerance(state, &
                this%entropy_lower_bound%x(i,1,1,1))
-          local_entropy_excess = max(local_entropy_excess, &
-               this%entropy_lower_bound%x(i,1,1,1) - entropy - &
-               entropy_tolerance)
+          if (this%entropy_lower_bound%x(i,1,1,1) - entropy - &
+               entropy_tolerance .gt. local_entropy_excess) then
+             local_entropy_excess = &
+                  this%entropy_lower_bound%x(i,1,1,1) - entropy - &
+                  entropy_tolerance
+             worst_entropy_node = i
+             worst_entropy = entropy
+             worst_entropy_bound = this%entropy_lower_bound%x(i,1,1,1)
+             worst_entropy_tolerance = entropy_tolerance
+          end if
        end do
        diagnostics%max_entropy_lower_violation = local_entropy_violation
        if (local_entropy_excess .gt. 0.0_rp) then
-          call neko_error('Euler IDP limited state violates its local ' // &
-               'minimum entropy bound')
+          write(message, '(A,A,A,I0,A,I0,A,I0,4(A,ES13.6))') &
+               'Euler IDP ', trim(label), ' violates its local minimum ' // &
+               'entropy bound on rank ', pe_rank, ', SSPRK stage ', &
+               diagnostics%stage, ', local node ', worst_entropy_node, &
+               ': entropy ', worst_entropy, ', bound ', worst_entropy_bound, &
+               ', violation ', worst_entropy_bound - worst_entropy, &
+               ', tolerance ', worst_entropy_tolerance
+          call neko_error(trim(message))
        end if
     end if
 

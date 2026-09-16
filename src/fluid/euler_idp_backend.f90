@@ -257,11 +257,12 @@ module euler_idp_backend
      end subroutine euler_idp_backend_candidate_observe_intrf
 
      subroutine euler_idp_backend_candidate_validate_intrf(this, gamma, &
-          diagnostics)
+          diagnostics, label)
        import :: euler_idp_backend_t, euler_idp_diagnostics_t, rp
        class(euler_idp_backend_t), intent(inout) :: this
        real(kind=rp), intent(in) :: gamma
        type(euler_idp_diagnostics_t), intent(inout) :: diagnostics
+       character(len=*), intent(in) :: label
      end subroutine euler_idp_backend_candidate_validate_intrf
 
      subroutine euler_idp_backend_save_state_intrf(this, rho, m_x, m_y, m_z, &

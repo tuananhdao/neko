@@ -314,6 +314,8 @@ neko_fortran_SOURCES = \
 	fluid/bcknd/device/compressible_res_device.F90\
 	fluid/bcknd/cpu/compressible_ops_cpu.f90\
 	fluid/bcknd/cpu/euler_idp_cpu.f90\
+	fluid/bcknd/device/euler_idp_device_kernels.F90\
+	fluid/bcknd/device/euler_idp_device.F90\
 	fluid/bcknd/device/compressible_ops_device.F90\
 	fluid/fluid_source_term.f90\
 	common/time_step_controller.f90\
@@ -614,6 +616,7 @@ libneko_la_SOURCES += \
 	fluid/bcknd/device/cuda/compressible_ops_compute_max_wave_speed.cu\
 	fluid/bcknd/device/cuda/compressible_ops_compute_entropy.cu\
 	fluid/bcknd/device/cuda/compressible_ops_update.cu\
+	fluid/bcknd/device/cuda/euler_idp.cu\
 	fluid/regularization/bcknd/device/cuda/entropy_viscosity.cu\
 	fluid/stress_formulation/bcknd/device/cuda/pnpn_stress_res.cu\
 	scalar/bcknd/device/cuda/scalar_residual.cu\

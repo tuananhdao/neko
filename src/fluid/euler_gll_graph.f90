@@ -39,6 +39,8 @@ module euler_gll_graph
   use gather_scatter, only : gs_t
   use gs_ops, only : GS_OP_ADD
   use comm, only : NEKO_COMM, MPI_REAL_PRECISION
+  use neko_config, only : NEKO_BCKND_DEVICE
+  use device, only : device_memcpy, HOST_TO_DEVICE, DEVICE_TO_HOST
   use utils, only : neko_error
   use logger, only : LOG_SIZE
   implicit none
@@ -325,7 +327,15 @@ contains
        call this%directional_degree(direction)%init(coef%dof, trim(name))
     end do
     this%mass%x = coef%B
+    if (NEKO_BCKND_DEVICE .eq. 1) then
+       call device_memcpy(this%mass%x, this%mass%x_d, this%mass%size(), &
+            HOST_TO_DEVICE, sync = .true.)
+    end if
     call gs%op(this%mass, GS_OP_ADD)
+    if (NEKO_BCKND_DEVICE .eq. 1) then
+       call device_memcpy(this%mass%x, this%mass%x_d, this%mass%size(), &
+            DEVICE_TO_HOST, sync = .true.)
+    end if
     if (any(this%mass%x .le. 0.0_rp)) then
        write(message, '(A,ES13.6)') &
             'Euler GLL graph requires positive assembled masses, minimum: ', &
@@ -347,9 +357,23 @@ contains
               1.0_rp
        end associate
     end do
+    if (NEKO_BCKND_DEVICE .eq. 1) then
+       do direction = 1, 3
+          call device_memcpy(this%directional_degree(direction)%x, &
+               this%directional_degree(direction)%x_d, this%mass%size(), &
+               HOST_TO_DEVICE, sync = .false.)
+       end do
+    end if
     call gs%op(this%directional_degree(1)%x, &
          this%directional_degree(2)%x, this%directional_degree(3)%x, &
          this%mass%size(), GS_OP_ADD)
+    if (NEKO_BCKND_DEVICE .eq. 1) then
+       do direction = 1, 3
+          call device_memcpy(this%directional_degree(direction)%x, &
+               this%directional_degree(direction)%x_d, this%mass%size(), &
+               DEVICE_TO_HOST, sync = direction .eq. 3)
+       end do
+    end if
     this%initialized = .true.
   end subroutine euler_gll_graph_init
 

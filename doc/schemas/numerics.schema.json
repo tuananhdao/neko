@@ -80,6 +80,21 @@
             },
             "internal_energy_floor": {
               "$ref": "urn:neko:schema:common#/$defs/positiveNumberOrRef"
+            },
+            "correction_tolerance": {
+              "$ref": "urn:neko:schema:common#/$defs/positiveNumberOrRef"
+            },
+            "diagnostics_level": {
+              "type": "string",
+              "enum": [
+                "off",
+                "safety",
+                "full"
+              ]
+            },
+            "diagnostics_interval": {
+              "type": "integer",
+              "minimum": 1
             }
           },
           "additionalProperties": false

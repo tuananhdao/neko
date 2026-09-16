@@ -637,8 +637,8 @@ contains
     if (.not. this%euler_idp%valid(message)) then
        call neko_error('Invalid Euler IDP configuration: ' // trim(message))
     end if
-    if (NEKO_BCKND_DEVICE .eq. 1 .or. NEKO_BCKND_SX .eq. 1) then
-       call neko_error('Euler IDP currently requires the CPU backend')
+    if (NEKO_BCKND_SX .eq. 1) then
+       call neko_error('Euler IDP does not support the SX backend')
     end if
 
     call json_get_or_default(params, 'case.numerics.time_order', &
