@@ -484,6 +484,7 @@ contains
   !> Advance one invariant-domain-preserving limited Euler step.
   subroutine fluid_scheme_compressible_ns_step_idp(this, time)
     use entropy_viscosity, only : entropy_viscosity_t
+    use entropy_viscosity_device, only : entropy_viscosity_fraction_device
     class(fluid_scheme_compressible_ns_t), intent(inout) :: this
     type(time_state_t), intent(in) :: time
     type(field_t), pointer :: entropy_fraction
@@ -500,15 +501,22 @@ contains
          temp_indices(1), .false.)
     select type (reg => this%regularization)
     type is (entropy_viscosity_t)
-       do i = 1, n
-          low_order_viscosity = reg%low_order_viscosity(i)
-          if (low_order_viscosity .gt. tiny(1.0_rp)) then
-             entropy_fraction%x(i,1,1,1) = min(1.0_rp, max(0.0_rp, &
-                  this%artificial_visc%x(i,1,1,1) / low_order_viscosity))
-          else
-             entropy_fraction%x(i,1,1,1) = 0.0_rp
-          end if
-       end do
+       if (NEKO_BCKND_DEVICE .eq. 1) then
+          call entropy_viscosity_fraction_device(entropy_fraction%x_d, &
+               this%artificial_visc%x_d, reg%h%x_d, &
+               reg%max_wave_speed%x_d, reg%c_avisc_low, n)
+       else
+          do i = 1, n
+             low_order_viscosity = reg%low_order_viscosity(i)
+             if (low_order_viscosity .gt. tiny(1.0_rp)) then
+                entropy_fraction%x(i,1,1,1) = min(1.0_rp, max(0.0_rp, &
+                     this%artificial_visc%x(i,1,1,1) / &
+                     low_order_viscosity))
+             else
+                entropy_fraction%x(i,1,1,1) = 0.0_rp
+             end if
+          end do
+       end if
        if (reg%use_user_entropy_pair) then
           call this%euler_idp_solver%advance(this%rho, this%m_x, this%m_y, &
                this%m_z, this%E, this%c_Xh, this%gs_Xh, this%bcs_density, &

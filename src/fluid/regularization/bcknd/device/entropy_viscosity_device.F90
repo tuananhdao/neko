@@ -145,6 +145,18 @@ module entropy_viscosity_device
   end interface
 
   interface
+     subroutine cuda_entropy_visc_fraction(fraction_d, reg_coeff_d, h_d, &
+          max_wave_speed_d, c_avisc_low, n) &
+          bind(c, name = 'cuda_entropy_visc_fraction')
+       use, intrinsic :: iso_c_binding
+       import c_rp
+       type(c_ptr), value :: fraction_d, reg_coeff_d, h_d, max_wave_speed_d
+       real(c_rp) :: c_avisc_low
+       integer(c_int) :: n
+     end subroutine cuda_entropy_visc_fraction
+  end interface
+
+  interface
      subroutine cuda_entropy_visc_smooth_divide(reg_coeff_d, &
           temp_field_d, mult_field_d, n) &
           bind(c, name = 'cuda_entropy_visc_smooth_divide')
@@ -274,6 +286,7 @@ module entropy_viscosity_device
             entropy_viscosity_compute_viscosity_device, &
             entropy_viscosity_apply_element_max_device, &
             entropy_viscosity_clamp_to_low_order_device, &
+            entropy_viscosity_fraction_device, &
             entropy_viscosity_smooth_divide_device
 
 contains
@@ -373,6 +386,22 @@ contains
     call neko_error('No device backend configured')
 #endif
   end subroutine entropy_viscosity_clamp_to_low_order_device
+
+  !> Convert entropy viscosity to a bounded low-order blending fraction.
+  subroutine entropy_viscosity_fraction_device(fraction_d, reg_coeff_d, &
+       h_d, max_wave_speed_d, c_avisc_low, n)
+    type(c_ptr), intent(in) :: fraction_d, reg_coeff_d, h_d
+    type(c_ptr), intent(in) :: max_wave_speed_d
+    real(kind=rp), intent(in) :: c_avisc_low
+    integer, intent(in) :: n
+
+#ifdef HAVE_CUDA
+    call cuda_entropy_visc_fraction(fraction_d, reg_coeff_d, h_d, &
+         max_wave_speed_d, c_avisc_low, n)
+#else
+    call neko_error('Euler IDP entropy-viscosity blending requires CUDA')
+#endif
+  end subroutine entropy_viscosity_fraction_device
 
   !> Divide by multiplicity for smoothing on device
   subroutine entropy_viscosity_smooth_divide_device(reg_coeff_d, &
