@@ -19,7 +19,7 @@
 */
 
 #include <cmath>
-#include <limits>
+#include <cfloat>
 #include <cuda.h>
 #include <cuda_runtime.h>
 #include <device/device_config.h>
@@ -33,6 +33,34 @@ template<typename T> __device__ __forceinline__ T rmin(T a, T b) {
 
 template<typename T> __device__ __forceinline__ T rmax(T a, T b) {
   return a > b ? a : b;
+}
+
+template<typename T> __device__ __forceinline__ T real_epsilon();
+template<typename T> __device__ __forceinline__ T real_tiny();
+template<typename T> __device__ __forceinline__ T real_huge();
+
+template<> __device__ __forceinline__ float real_epsilon<float>() {
+  return FLT_EPSILON;
+}
+
+template<> __device__ __forceinline__ double real_epsilon<double>() {
+  return DBL_EPSILON;
+}
+
+template<> __device__ __forceinline__ float real_tiny<float>() {
+  return FLT_MIN;
+}
+
+template<> __device__ __forceinline__ double real_tiny<double>() {
+  return DBL_MIN;
+}
+
+template<> __device__ __forceinline__ float real_huge<float>() {
+  return FLT_MAX;
+}
+
+template<> __device__ __forceinline__ double real_huge<double>() {
+  return DBL_MAX;
 }
 
 template<typename T> __device__ __forceinline__ T atomic_min_real(T *p, T v);
@@ -108,7 +136,7 @@ __device__ __forceinline__ bool state_is_admissible(const T s[5], T floor) {
 
 template<typename T>
 __device__ __forceinline__ T specific_entropy(const T s[5], T gamma) {
-  const T huge = std::numeric_limits<T>::max();
+  const T huge = real_huge<T>();
   for (int c = 0; c < 5; ++c) if (!isfinite(s[c])) return -huge;
   if (s[0] <= T(0)) return -huge;
   const T pressure = (gamma - T(1)) * internal_energy(s);
@@ -118,8 +146,8 @@ __device__ __forceinline__ T specific_entropy(const T s[5], T gamma) {
 
 template<typename T>
 __device__ __forceinline__ T entropy_tolerance(const T s[5], T lower) {
-  const T eps = std::numeric_limits<T>::epsilon();
-  const T tiny = std::numeric_limits<T>::min();
+  const T eps = real_epsilon<T>();
+  const T tiny = real_tiny<T>();
   T conditioning = T(1);
   bool finite = s[0] > T(0);
   for (int c = 0; c < 5; ++c) finite = finite && isfinite(s[c]);
@@ -230,7 +258,7 @@ __device__ __forceinline__ T entropy_margin_derivative(const T s[5],
 template<typename T>
 __device__ void limit_energy(const T base[5], const T correction[5], T floor,
                              T &limit) {
-  const T eps = std::numeric_limits<T>::epsilon();
+  const T eps = real_epsilon<T>();
   T left=T(0), right=limit, trial[5];
   T vl=energy_margin(base,floor);
   for (int c=0;c<5;++c) trial[c]=base[c]+right*correction[c];
@@ -264,7 +292,7 @@ __device__ void limit_energy(const T base[5], const T correction[5], T floor,
 template<typename T>
 __device__ void limit_entropy(const T base[5], const T correction[5], T lower,
                               T gamma, T &limit) {
-  const T eps=std::numeric_limits<T>::epsilon();
+  const T eps=real_epsilon<T>();
   T left=T(0), right=limit, trial[5];
   T vl=entropy_margin(base,lower,gamma);
   for (int c=0;c<5;++c) trial[c]=base[c]+right*correction[c];
@@ -322,7 +350,7 @@ __device__ T limit_endpoint(const T base[5], const T correction[5], T dl,
                             bool enforce_entropy, bool check_base,
                             bool &density_limited, bool &energy_limited,
                             bool &entropy_limited) {
-  const T eps=std::numeric_limits<T>::epsilon();
+  const T eps=real_epsilon<T>();
   T limit=T(1), trial[5];
   density_limited=false; energy_limited=false; entropy_limited=false;
   if(check_base) {
@@ -362,7 +390,7 @@ __device__ T limit_endpoint(const T base[5], const T correction[5], T dl,
 template<typename T>
 __device__ T floor_timestep(const T state[5], const T residual[5], T floor,
                             T upper) {
-  const T eps=std::numeric_limits<T>::epsilon();
+  const T eps=real_epsilon<T>();
   T limit=rmax(T(0),upper), trial[5];
   if(limit<=T(0)) return limit;
   if(residual[0]>T(0)) {
@@ -669,7 +697,7 @@ __global__ void bounds_edge_kernel(const T *rho,const T *mx,const T *my,
     const int a=left[e],b=right[e],d=direction[e]-1;const T ra=rho[a],rb=rho[b];
     const T fa=coef[3*e]*mx[a]+coef[3*e+1]*my[a]+coef[3*e+2]*mz[a];
     const T fb=coef[3*e]*mx[b]+coef[3*e+1]*my[b]+coef[3*e+2]*mz[b];
-    T bar=T(0.5)*(ra+rb);if(visc[e]>std::numeric_limits<T>::min())bar-=(fb-fa)/(T(2)*visc[e]);
+    T bar=T(0.5)*(ra+rb);if(visc[e]>real_tiny<T>())bar-=(fb-fa)/(T(2)*visc[e]);
     atomic_min_real(lower+a,rmin(rb,bar));atomic_min_real(lower+b,rmin(ra,bar));
     atomic_max_real(upper+a,rmax(rb,bar));atomic_max_real(upper+b,rmax(ra,bar));
     if(use_entropy){const T ea=entropy_stage[a],eb=entropy_stage[b];atomic_min_real(entropy+a,eb);atomic_min_real(entropy+b,ea);}
@@ -706,15 +734,15 @@ __global__ void limiter_kernel(const T *q0,const T *q1,const T *q2,
   T *edge_limit,T *limited,T *density_flag,T *energy_flag,T *entropy_flag,
   T gamma,T floor,int enforce_energy,int enforce_entropy,int check_base,
   int dimensions,int nedge){const T *q[5]={q0,q1,q2,q3,q4};const T *degree[3]={degree0,degree1,degree2};
-  const T eps=std::numeric_limits<T>::epsilon();
+  const T eps=real_epsilon<T>();
   for(int e=blockIdx.x*blockDim.x+threadIdx.x;e<nedge;e+=blockDim.x*gridDim.x){const int a=left[e],b=right[e],d=direction[e]-1;
     T lb[5],rb[5],lc[5],rc[5];T scale=T(1),size=T(0);for(int c=0;c<5;++c){lb[c]=q[c][a];rb[c]=q[c][b];
       lc[c]=correction[5*e+c]*T(dimensions)*degree[d][a]/mass[a];rc[c]=-correction[5*e+c]*T(dimensions)*degree[d][b]/mass[b];
       scale=rmax(scale,rmax(fabs(lb[c]),fabs(rb[c])));size=rmax(size,rmax(fabs(lc[c]),fabs(rc[c])));}
     bool dl=false,el=false,sl=false;T limit=T(1);
     if(size<=T(512)*eps*scale){for(int c=0;c<5;++c)correction[5*e+c]=T(0);}
-    else {bool dl1,el1,sl1,dl2,el2,sl2;const T sent=enforce_entropy?entropy[a]:-std::numeric_limits<T>::max();
-      const T tent=enforce_entropy?entropy[b]:-std::numeric_limits<T>::max();
+    else {bool dl1,el1,sl1,dl2,el2,sl2;const T sent=enforce_entropy?entropy[a]:-real_huge<T>();
+      const T tent=enforce_entropy?entropy[b]:-real_huge<T>();
       T l1=limit_endpoint(lb,lc,lower[a],upper[a],sent,gamma,floor,enforce_energy,enforce_entropy,check_base,dl1,el1,sl1);
       T l2=limit_endpoint(rb,rc,lower[b],upper[b],tent,gamma,floor,enforce_energy,enforce_entropy,check_base,dl2,el2,sl2);
       limit=rmin(l1,l2);dl=dl1||dl2;el=el1||el2;sl=sl1||sl2;
@@ -758,7 +786,7 @@ __global__ void update_momentum_pressure_kernel(T *mx,T *my,T *mz,T *p,T *kin,
     kin[i]=T(0.5)*rho[i]*(u[i]*u[i]+v[i]*v[i]+w[i]*w[i]);p[i]=(gamma-T(1))*(energy[i]-kin[i]);}}
 
 template<typename T>
-__global__ void update_energy_kernel(T *energy,T *p,const T *kin,T gamma,T floor,int n){const T inv=T(1)/(gamma-T(1));const T eps=std::numeric_limits<T>::epsilon();
+__global__ void update_energy_kernel(T *energy,T *p,const T *kin,T gamma,T floor,int n){const T inv=T(1)/(gamma-T(1));const T eps=real_epsilon<T>();
   for(int i=blockIdx.x*blockDim.x+threadIdx.x;i<n;i+=blockDim.x*gridDim.x){p[i]=rmax(p[i],T(1e-12));if(p[i]*inv<=rmax(floor,T(0))){const T guard=T(32)*eps*rmax(T(1),rmax(fabs(kin[i]),floor));p[i]=(gamma-T(1))*(floor+guard);}energy[i]=p[i]*inv+kin[i];}}
 
 inline dim3 blocks(int n) { return dim3((n+255)/256,1,1); }
