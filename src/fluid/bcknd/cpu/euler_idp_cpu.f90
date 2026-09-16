@@ -850,12 +850,14 @@ contains
     real(kind=rp) :: state(EULER_IDP_NCOMP), residual(EULER_IDP_NCOMP)
     real(kind=rp) :: local_floor_timestep, global_floor_timestep
     real(kind=rp) :: local_error, local_scale
+    real(kind=rp) :: local_entropy_sum, global_entropy_sum
+    real(kind=rp) :: local_entropy_max, global_entropy_max
     real(kind=rp) :: high_order_fraction, edge_fraction
     real(kind=rp) :: state_difference(EULER_IDP_NCOMP)
     real(kind=rp) :: directional_error_local(EULER_IDP_NCOMP)
     real(kind=rp) :: local_wave_speed, global_wave_speed
     character(len=2 * LOG_SIZE) :: message
-    integer :: component, edge, i, ierr
+    integer :: component, edge, global_node_count, i, ierr
     logical :: scalar_density_mode
 
     call profiler_start_region('Euler IDP Forward Euler')
@@ -977,6 +979,26 @@ contains
 
     call this%compute_bounds(rho, m_x, m_y, m_z, energy, gs, gamma, &
          diagnostics)
+
+    if (present(entropy_viscosity_fraction)) then
+       local_entropy_max = 0.0_rp
+       local_entropy_sum = 0.0_rp
+       if (rho%size() .gt. 0) then
+          local_entropy_max = maxval(entropy_viscosity_fraction%x)
+          local_entropy_sum = sum(entropy_viscosity_fraction%x)
+       end if
+       call profiler_start_region('Euler IDP MPI reduction')
+       call MPI_Allreduce(local_entropy_max, global_entropy_max, 1, &
+            MPI_REAL_PRECISION, MPI_MAX, NEKO_COMM, ierr)
+       call MPI_Allreduce(local_entropy_sum, global_entropy_sum, 1, &
+            MPI_REAL_PRECISION, MPI_SUM, NEKO_COMM, ierr)
+       call MPI_Allreduce(rho%size(), global_node_count, 1, MPI_INTEGER, &
+            MPI_SUM, NEKO_COMM, ierr)
+       call profiler_end_region('Euler IDP MPI reduction')
+       diagnostics%max_entropy_viscosity = global_entropy_max
+       diagnostics%mean_entropy_viscosity = global_entropy_sum / &
+            real(max(1, global_node_count), rp)
+    end if
 
     if (this%diagnostics_level .eq. EULER_IDP_DIAGNOSTICS_FULL) then
        do component = 1, EULER_IDP_NCOMP
@@ -1430,7 +1452,7 @@ contains
     type(euler_idp_diagnostics_t), intent(inout) :: diagnostics
     character(len=*), intent(in) :: label
     real(kind=rp) :: state(EULER_IDP_NCOMP)
-    real(kind=rp) :: local_bound_violation(2), local_entropy_violation
+    real(kind=rp) :: local_bound_violation(2)
     real(kind=rp) :: local_entropy_excess, entropy, entropy_tolerance
     real(kind=rp) :: worst_entropy, worst_entropy_bound
     real(kind=rp) :: worst_entropy_tolerance
@@ -1461,7 +1483,6 @@ contains
     end if
 
     if (this%limit_entropy) then
-       local_entropy_violation = 0.0_rp
        local_entropy_excess = 0.0_rp
        worst_entropy_node = 0
        worst_entropy = huge(1.0_rp)
@@ -1474,8 +1495,6 @@ contains
                this%low_candidate(4)%x(i,1,1,1), &
                this%low_candidate(5)%x(i,1,1,1)]
           entropy = euler_idp_specific_entropy(state, gamma)
-          local_entropy_violation = max(local_entropy_violation, &
-               this%entropy_lower_bound%x(i,1,1,1) - entropy)
           entropy_tolerance = euler_idp_entropy_tolerance(state, &
                this%entropy_lower_bound%x(i,1,1,1))
           if (this%entropy_lower_bound%x(i,1,1,1) - entropy - &
@@ -1489,7 +1508,7 @@ contains
              worst_entropy_tolerance = entropy_tolerance
           end if
        end do
-       diagnostics%max_entropy_lower_violation = local_entropy_violation
+       diagnostics%max_entropy_lower_violation = local_entropy_excess
        if (local_entropy_excess .gt. 0.0_rp) then
           write(message, '(A,A,A,I0,A,I0,A,I0,4(A,ES13.6))') &
                'Euler IDP ', trim(label), ' violates its local minimum ' // &

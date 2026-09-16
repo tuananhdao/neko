@@ -207,6 +207,7 @@ def _parse_summary(log_path):
         "EULER_IDP_LIMITER": None,
         "EULER_IDP_LIMITER_STATS": None,
         "EULER_IDP_LIMITER_COUNTS": None,
+        "EULER_IDP_ENTROPY_BLEND": None,
         "EULER_IDP_STATE": None,
         "EULER_IDP_BOUNDS": None,
         "EULER_IDP_CONSERVATION": None,
@@ -238,6 +239,9 @@ def _parse_summary(log_path):
         ),
         "limiter_counts": np.asarray(
             tags["EULER_IDP_LIMITER_COUNTS"], dtype=int
+        ),
+        "entropy_blend": np.asarray(
+            tags["EULER_IDP_ENTROPY_BLEND"], dtype=float
         ),
         "state": np.asarray(tags["EULER_IDP_STATE"], dtype=float),
         "bounds": np.asarray(tags["EULER_IDP_BOUNDS"], dtype=float),
@@ -317,6 +321,7 @@ def _run_case(
         "drifts",
         "limiter",
         "limiter_stats",
+        "entropy_blend",
         "state",
         "bounds",
         "stage_conservation",
@@ -333,6 +338,8 @@ def _run_case(
     assert limiter_mean <= limiter_max + tolerance
     assert limiter_max <= 1.0 + tolerance
     assert -tolerance <= limited_fraction <= 1.0 + tolerance
+    assert np.all(summary["entropy_blend"] >= -tolerance)
+    assert np.all(summary["entropy_blend"] <= 1.0 + tolerance)
     assert np.max(summary["correction"]) <= _tolerances()["correction"]
     return summary
 
@@ -501,6 +508,7 @@ def test_idp_near_vacuum_evolution(
         "limiter",
         "limiter_stats",
         "limiter_counts",
+        "entropy_blend",
         "state",
         "bounds",
         "stage_conservation",

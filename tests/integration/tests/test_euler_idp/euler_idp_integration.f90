@@ -19,6 +19,8 @@ module user
   real(kind=rp) :: minimum_mean_limiter = 1.0_rp
   real(kind=rp) :: maximum_limiter = 0.0_rp
   real(kind=rp) :: maximum_limited_fraction = 0.0_rp
+  real(kind=rp) :: maximum_entropy_viscosity = 0.0_rp
+  real(kind=rp) :: maximum_mean_entropy_viscosity = 0.0_rp
   real(kind=rp) :: maximum_graph_cfl = 0.0_rp
   real(kind=rp) :: maximum_density_lower_violation = 0.0_rp
   real(kind=rp) :: maximum_density_upper_violation = 0.0_rp
@@ -372,6 +374,11 @@ contains
                  diagnostic%max_limiter)
             maximum_limited_fraction = max(maximum_limited_fraction, &
                  diagnostic%limited_edge_fraction)
+            maximum_entropy_viscosity = max(maximum_entropy_viscosity, &
+                 diagnostic%max_entropy_viscosity)
+            maximum_mean_entropy_viscosity = &
+                 max(maximum_mean_entropy_viscosity, &
+                 diagnostic%mean_entropy_viscosity)
             maximum_limiter_counts = max(maximum_limiter_counts, &
                  [diagnostic%density_limited_edges, &
                  diagnostic%internal_energy_limited_edges, &
@@ -401,6 +408,8 @@ contains
                  diagnostic%min_limiter, diagnostic%mean_limiter, &
                  diagnostic%max_limiter, &
                  diagnostic%limited_edge_fraction, &
+                 diagnostic%max_entropy_viscosity, &
+                 diagnostic%mean_entropy_viscosity, &
                  diagnostic%max_graph_cfl, &
                  diagnostic%max_density_lower_violation, &
                  diagnostic%max_density_upper_violation, &
@@ -490,6 +499,8 @@ contains
             maximum_limited_fraction
        write(*, '(A,3(1X,I0))') 'EULER_IDP_LIMITER_COUNTS', &
             maximum_limiter_counts
+       write(*, '(A,2(1X,ES25.16E3))') 'EULER_IDP_ENTROPY_BLEND', &
+            maximum_entropy_viscosity, maximum_mean_entropy_viscosity
        write(*, '(A,4(1X,ES25.16E3))') 'EULER_IDP_STATE', &
             minimum_stage_density, minimum_stage_internal_energy, &
             minimum_density, minimum_internal_energy
@@ -533,13 +544,15 @@ contains
 
   !> Check every scalar carried by one stage diagnostic.
   logical function diagnostic_is_finite(rho_min, energy_min, limiter_min, &
-       limiter_mean, limiter_max, limited_fraction, graph_cfl, &
+       limiter_mean, limiter_max, limited_fraction, entropy_max, &
+       entropy_mean, graph_cfl, &
        density_lower_violation, density_upper_violation, entropy_violation, &
        conservation, reconstruction, correction_compatibility) &
        result(finite)
     real(kind=rp), intent(in) :: rho_min, energy_min, limiter_min
     real(kind=rp), intent(in) :: limiter_mean, limiter_max
-    real(kind=rp), intent(in) :: limited_fraction, graph_cfl
+    real(kind=rp), intent(in) :: limited_fraction, entropy_max
+    real(kind=rp), intent(in) :: entropy_mean, graph_cfl
     real(kind=rp), intent(in) :: density_lower_violation
     real(kind=rp), intent(in) :: density_upper_violation, entropy_violation
     real(kind=rp), intent(in) :: conservation(5), reconstruction(5)
@@ -551,6 +564,8 @@ contains
          ieee_is_finite(limiter_mean) .and. &
          ieee_is_finite(limiter_max) .and. &
          ieee_is_finite(limited_fraction) .and. &
+         ieee_is_finite(entropy_max) .and. &
+         ieee_is_finite(entropy_mean) .and. &
          ieee_is_finite(graph_cfl) .and. &
          ieee_is_finite(density_lower_violation) .and. &
          ieee_is_finite(density_upper_violation) .and. &

@@ -299,7 +299,13 @@ contains
     end if
 
     if (.not. this%use_user_entropy_pair) then
-       call div(div_field%x, us_field%x, vs_field%x, ws_field%x, this%coef)
+       if (NEKO_BCKND_DEVICE .eq. 1) then
+          call div(div_field%x_d, us_field%x_d, vs_field%x_d, &
+               ws_field%x_d, this%coef)
+       else
+          call div(div_field%x, us_field%x, vs_field%x, ws_field%x, &
+               this%coef)
+       end if
     end if
 
     if (NEKO_BCKND_DEVICE .eq. 1) then
