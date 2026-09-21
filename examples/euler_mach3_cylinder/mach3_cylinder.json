@@ -44,10 +44,6 @@
           "value": 1.0
         },
         {
-          "type": "outflow",
-          "zone_indices": [2]
-        },
-        {
           "type": "slip",
           "zone_indices": [3, 4, 7]
         }

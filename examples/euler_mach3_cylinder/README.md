@@ -8,7 +8,8 @@ benchmark shown in <https://www.youtube.com/watch?v=pPP26zelb0M>:
 - cylinder diameter `0.5`, centred at `(0.6, 0)`;
 - primitive free-stream state `(rho, u, v, p) = (1.4, 3, 0, 1)`;
 - `gamma = 1.4` and final time `t = 5`;
-- prescribed free stream at the inlet, transmissive outflow, and slip walls;
+- prescribed free stream at the inlet, natural supersonic outflow, and slip
+  walls;
 - 25,020 structured quadrilateral spectral elements.
 
 The exact reference parameters are in Ryujin's
@@ -29,7 +30,7 @@ bound. The conservative CFL target is `0.2` rather than Ryujin's `0.9`.
 | Zone | Boundary | Neko condition |
 | ---: | --- | --- |
 | 1 | inlet, `x = 0` | prescribed free-stream primitive state |
-| 2 | outlet, `x = 4` | outflow |
+| 2 | outlet, `x = 4` | natural (no strong pressure condition) |
 | 3 | top, `y = 1` | slip |
 | 4 | bottom, `y = -1` | slip |
 | 7 | cylinder | slip |
