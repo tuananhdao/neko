@@ -719,6 +719,37 @@ __global__ void relax_finalize_kernel(T *lower,T *upper,const T *second,
     const T relax=factor*fabs(d);lower[i]=rmax((T(1)-rh)*lower[i],lower[i]-relax);upper[i]+=relax;}}
 
 template<typename T>
+__global__ void entropy_relax_edge_kernel(const T *rho,const T *mx,
+  const T *my,const T *mz,const T *energy,const int *left,const int *right,
+  T *midpoint_max,T gamma,int nedge) {
+  for(int e=blockIdx.x*blockDim.x+threadIdx.x;e<nedge;
+      e+=blockDim.x*gridDim.x) {
+    const int a=left[e],b=right[e];
+    T sa[5],sb[5],midpoint[5];
+    load_state(rho,mx,my,mz,energy,a,sa);
+    load_state(rho,mx,my,mz,energy,b,sb);
+    for(int c=0;c<5;++c) midpoint[c]=T(0.5)*(sa[c]+sb[c]);
+    const T entropy=specific_entropy(midpoint,gamma);
+    atomic_max_real(midpoint_max+a,entropy);
+    atomic_max_real(midpoint_max+b,entropy);
+  }
+}
+
+template<typename T>
+__global__ void entropy_relax_finalize_kernel(T *lower,
+  const T *midpoint_max,T factor,T maximum_fraction,int n) {
+  const T cutoff=log(T(1)+maximum_fraction/factor);
+  for(int i=blockIdx.x*blockDim.x+threadIdx.x;i<n;
+      i+=blockDim.x*gridDim.x) {
+    const T difference=rmax(T(0),midpoint_max[i]-lower[i]);
+    const T variation=exp(rmin(difference,cutoff))-T(1);
+    const T relaxation=rmin(maximum_fraction,
+                            factor*rmax(T(0),variation));
+    lower[i]+=log(T(1)-relaxation);
+  }
+}
+
+template<typename T>
 __global__ void blend_kernel(const T *rho,const T *mx,const T *my,const T *mz,
   const T *energy,const int *left,const int *right,const T *visc,const T *ev,
   T *correction,T dt,int has_ev,int low_only,int scalar_mode,int nedge){const T *u[5]={rho,mx,my,mz,energy};
@@ -1077,6 +1108,20 @@ void cuda_euler_idp_relax_edges(void *left,void *right,void *direction,
   int *nedge){cudaStream_t s=(cudaStream_t)glb_cmd_queue;CUDA_CHECK(cudaMemsetAsync(second,0,sizeof(real)*(*n),s));relax_edge_kernel<real><<<blocks(*nedge),threads(),0,s>>>((int*)left,(int*)right,(int*)direction,(real*)degree0,(real*)degree1,(real*)degree2,(real*)first,(real*)second,*nedge);CUDA_CHECK(cudaGetLastError());}
 void cuda_euler_idp_relax_finalize(void *lower,void *upper,void *second,
   real *factor,real *nodal_mass,real *volume,int *dimensions,int *n){cudaStream_t s=(cudaStream_t)glb_cmd_queue;relax_finalize_kernel<real><<<blocks(*n),threads(),0,s>>>((real*)lower,(real*)upper,(real*)second,*factor,*nodal_mass,*volume,*dimensions,*n);CUDA_CHECK(cudaGetLastError());}
+
+void cuda_euler_idp_entropy_relax_edges(void *rho,void *mx,void *my,void *mz,
+  void *energy,void *left,void *right,void *midpoint_max,real *gamma,
+  int *nedge){cudaStream_t s=(cudaStream_t)glb_cmd_queue;
+  entropy_relax_edge_kernel<real><<<blocks(*nedge),threads(),0,s>>>(
+    (real*)rho,(real*)mx,(real*)my,(real*)mz,(real*)energy,(int*)left,
+    (int*)right,(real*)midpoint_max,*gamma,*nedge);
+  CUDA_CHECK(cudaGetLastError());}
+
+void cuda_euler_idp_entropy_relax_finalize(void *lower,void *midpoint_max,
+  real *factor,real *maximum_fraction,int *n){cudaStream_t s=(cudaStream_t)glb_cmd_queue;
+  entropy_relax_finalize_kernel<real><<<blocks(*n),threads(),0,s>>>(
+    (real*)lower,(real*)midpoint_max,*factor,*maximum_fraction,*n);
+  CUDA_CHECK(cudaGetLastError());}
 
 void cuda_euler_idp_blend(void *rho,void *mx,void *my,void *mz,void *energy,
   void *left,void *right,void *visc,void *ev,void *correction,real *dt,

@@ -118,6 +118,9 @@ def euler_idp_runtime(tmp_path_factory):
     periodic_mesh = generate_mesh(
         "periodic_box", (4, 4, 1), (True, True, True)
     )
+    periodic_3d_mesh = generate_mesh(
+        "periodic_box_3d", (4, 4, 4), (True, True, True)
+    )
     bounded_x_mesh = generate_mesh(
         "bounded_x_box", (4, 2, 1), (False, True, True)
     )
@@ -129,6 +132,7 @@ def euler_idp_runtime(tmp_path_factory):
         "directory": work_dir,
         "environment": environment,
         "mesh": periodic_mesh,
+        "periodic_3d_mesh": periodic_3d_mesh,
         "bounded_x_mesh": bounded_x_mesh,
         "bounded_xy_mesh": bounded_xy_mesh,
         "neko": work_dir / "neko",
@@ -148,6 +152,10 @@ def _case(
     limit_entropy=True,
     time_order=3,
     diagnostics_level="full",
+    relax_density_bounds=False,
+    relax_entropy_bounds=False,
+    entropy_bound_relaxation_factor=1.0,
+    entropy_bound_relaxation_cap=0.01,
 ):
     """Build a short, output-free Euler IDP case."""
     output_dir = runtime["directory"] / (
@@ -176,9 +184,16 @@ def _case(
                 "euler_idp": {
                     "enabled": True,
                     "low_order_only": False,
-                    "relax_density_bounds": False,
+                    "relax_density_bounds": relax_density_bounds,
+                    "relax_entropy_bounds": relax_entropy_bounds,
                     "limit_internal_energy": True,
                     "limit_entropy": limit_entropy,
+                    "entropy_bound_relaxation_factor": (
+                        entropy_bound_relaxation_factor
+                    ),
+                    "entropy_bound_relaxation_cap": (
+                        entropy_bound_relaxation_cap
+                    ),
                     "internal_energy_floor": internal_energy_floor,
                     "diagnostics_level": diagnostics_level,
                     "diagnostics_interval": 1,
@@ -271,6 +286,10 @@ def _run_case(
     limit_entropy=True,
     time_order=3,
     diagnostics_level="full",
+    relax_density_bounds=False,
+    relax_entropy_bounds=False,
+    entropy_bound_relaxation_factor=1.0,
+    entropy_bound_relaxation_cap=0.01,
     case_label=None,
     record_parity=True,
 ):
@@ -288,6 +307,10 @@ def _run_case(
         limit_entropy,
         time_order,
         diagnostics_level,
+        relax_density_bounds,
+        relax_entropy_bounds,
+        entropy_bound_relaxation_factor,
+        entropy_bound_relaxation_cap,
     )
     label = case_label or problem
     suffix = (
@@ -569,6 +592,91 @@ def test_idp_smooth_transport(
                     "correction",
                 ),
             )
+
+
+def test_idp_relaxed_entropy_smooth_transport(
+    launcher_script, log_file, euler_idp_runtime
+):
+    """Relaxed entropy bounds preserve smooth p-refinement."""
+    tolerance = _tolerances()
+    rank_runs = {}
+    for mpi_ranks in _rank_sequence():
+        runs = {}
+        for polynomial_order in (2, 3, 4):
+            runs[polynomial_order] = _run_case(
+                launcher_script,
+                log_file,
+                euler_idp_runtime,
+                "smooth_transport",
+                polynomial_order=polynomial_order,
+                steps=100,
+                timestep=5.0e-4,
+                mpi_ranks=mpi_ranks,
+                time_order=3,
+                relax_density_bounds=True,
+                relax_entropy_bounds=True,
+                case_label="smooth_transport_entropy_relaxed",
+            )
+            summary = runs[polynomial_order]
+            assert np.min(summary["state"][[0, 2]]) > 0.0
+            assert np.min(summary["state"][[1, 3]]) >= NEAR_VACUUM_FLOOR
+            assert np.max(summary["bounds"]) <= tolerance["bounds"]
+
+        assert np.max(runs[4]["errors"]) < np.max(runs[2]["errors"])
+        assert runs[4]["errors"][0] < runs[2]["errors"][0]
+        rank_runs[mpi_ranks] = runs
+
+    if 1 in rank_runs and 2 in rank_runs:
+        for polynomial_order in (2, 3, 4):
+            _assert_rank_invariant(
+                {
+                    1: rank_runs[1][polynomial_order],
+                    2: rank_runs[2][polynomial_order],
+                },
+                (
+                    "errors",
+                    "drifts",
+                    "limiter",
+                    "state",
+                    "bounds",
+                    "stage_conservation",
+                    "correction",
+                ),
+            )
+
+    strict = _run_case(
+        launcher_script,
+        log_file,
+        euler_idp_runtime,
+        "smooth_transport",
+        polynomial_order=3,
+        steps=8,
+        timestep=2.44140625e-4,
+        mpi_ranks=1,
+        mesh=euler_idp_runtime["periodic_3d_mesh"],
+        time_order=3,
+        relax_density_bounds=True,
+        relax_entropy_bounds=False,
+        case_label="smooth_transport_entropy_strict_3d",
+    )
+    relaxed = _run_case(
+        launcher_script,
+        log_file,
+        euler_idp_runtime,
+        "smooth_transport",
+        polynomial_order=3,
+        steps=8,
+        timestep=2.44140625e-4,
+        mpi_ranks=1,
+        mesh=euler_idp_runtime["periodic_3d_mesh"],
+        time_order=3,
+        relax_density_bounds=True,
+        relax_entropy_bounds=True,
+        case_label="smooth_transport_entropy_relaxed_3d",
+    )
+    assert strict["limiter_counts"][2] > 0
+    assert relaxed["limiter_counts"][2] < strict["limiter_counts"][2]
+    assert np.max(relaxed["errors"]) < np.max(strict["errors"])
 
 
 @pytest.mark.parametrize("time_order", (1, 3))

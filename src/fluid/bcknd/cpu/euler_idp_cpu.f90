@@ -56,6 +56,7 @@ module euler_idp_cpu
        euler_idp_internal_energy, euler_idp_internal_energy_timestep, &
        euler_idp_limit_edge, &
        euler_idp_local_entropy_bounds, euler_idp_relax_density_bounds, &
+       euler_idp_relax_entropy_bound, &
        euler_idp_specific_entropy, euler_idp_entropy_tolerance, &
        euler_idp_entropy_is_admissible
   use euler_gll_graph, only : euler_gll_graph_t
@@ -71,9 +72,12 @@ module euler_idp_cpu
      logical :: periodic_graph = .false.
      logical :: low_order_only = .false.
      logical :: relax_density_bounds = .false.
+     logical :: relax_entropy_bounds = .false.
      logical :: limit_internal_energy = .true.
      logical :: limit_entropy = .true.
      real(kind=rp) :: density_bound_relaxation_factor = 1.0_rp
+     real(kind=rp) :: entropy_bound_relaxation_factor = 1.0_rp
+     real(kind=rp) :: entropy_bound_relaxation_cap = 0.01_rp
      real(kind=rp) :: correction_tolerance = 1.0e-10_rp
      type(euler_gll_graph_t) :: graph
      type(field_t) :: local_residual(EULER_IDP_NCOMP)
@@ -171,23 +175,31 @@ contains
     this%maximum_floor_timestep = huge(1.0_rp)
     this%limiter_weight_error = 0.0_rp
     this%low_order_only = .false.
+    this%relax_density_bounds = .false.
+    this%relax_entropy_bounds = .false.
     this%limit_internal_energy = .true.
     this%limit_entropy = .true.
     this%density_bound_relaxation_factor = 1.0_rp
+    this%entropy_bound_relaxation_factor = 1.0_rp
+    this%entropy_bound_relaxation_cap = 0.01_rp
     this%initialized = .true.
   end subroutine euler_idp_cpu_init
 
   !> Initialise the sparse GLL graph after coefficients are available.
   subroutine euler_idp_cpu_init_graph(this, coef, gs, relax_density_bounds, &
-       low_order_only, limit_internal_energy, limit_entropy, &
-       density_bound_relaxation_factor, time_order, diagnostics_level, &
-       correction_tolerance)
+       relax_entropy_bounds, low_order_only, limit_internal_energy, &
+       limit_entropy, density_bound_relaxation_factor, &
+       entropy_bound_relaxation_factor, entropy_bound_relaxation_cap, &
+       time_order, diagnostics_level, correction_tolerance)
     class(euler_idp_cpu_t), intent(inout) :: this
     type(coef_t), target, intent(in) :: coef
     type(gs_t), intent(inout) :: gs
-    logical, intent(in) :: relax_density_bounds, low_order_only
+    logical, intent(in) :: relax_density_bounds, relax_entropy_bounds
+    logical, intent(in) :: low_order_only
     logical, intent(in) :: limit_internal_energy, limit_entropy
     real(kind=rp), intent(in) :: density_bound_relaxation_factor
+    real(kind=rp), intent(in) :: entropy_bound_relaxation_factor
+    real(kind=rp), intent(in) :: entropy_bound_relaxation_cap
     real(kind=rp), intent(in) :: correction_tolerance
     integer, intent(in) :: time_order, diagnostics_level
     real(kind=rp) :: local_error, global_error
@@ -200,16 +212,23 @@ contains
     end if
     this%correction_tolerance = correction_tolerance
     this%relax_density_bounds = .false.
+    this%relax_entropy_bounds = .false.
     this%low_order_only = .false.
     this%limit_internal_energy = .true.
     this%limit_entropy = .true.
     this%density_bound_relaxation_factor = 1.0_rp
+    this%entropy_bound_relaxation_factor = 1.0_rp
+    this%entropy_bound_relaxation_cap = 0.01_rp
     this%relax_density_bounds = relax_density_bounds
+    this%relax_entropy_bounds = relax_entropy_bounds
     this%low_order_only = low_order_only
     this%limit_internal_energy = limit_internal_energy
     this%limit_entropy = limit_entropy
     this%density_bound_relaxation_factor = &
          density_bound_relaxation_factor
+    this%entropy_bound_relaxation_factor = &
+         entropy_bound_relaxation_factor
+    this%entropy_bound_relaxation_cap = entropy_bound_relaxation_cap
     this%diagnostics_level = diagnostics_level
     do component = 1, EULER_IDP_NCOMP
        call this%local_residual(component)%free()
@@ -370,9 +389,12 @@ contains
     this%periodic_graph = .false.
     this%low_order_only = .false.
     this%relax_density_bounds = .false.
+    this%relax_entropy_bounds = .false.
     this%limit_internal_energy = .true.
     this%limit_entropy = .true.
     this%density_bound_relaxation_factor = 1.0_rp
+    this%entropy_bound_relaxation_factor = 1.0_rp
+    this%entropy_bound_relaxation_cap = 0.01_rp
     this%correction_tolerance = 1.0e-10_rp
     this%max_graph_rate = 0.0_rp
     this%max_graph_wave_speed = 0.0_rp
@@ -827,6 +849,46 @@ contains
                this%graph%n_directions, relaxed_lower, relaxed_upper)
           this%density_lower_bound%x(i,1,1,1) = relaxed_lower
           this%density_upper_bound%x(i,1,1,1) = relaxed_upper
+       end do
+    end if
+
+    if (this%limit_entropy .and. this%relax_entropy_bounds) then
+       ! The sparse graph is treated as a collection of linear subedges.
+       ! Accumulate the maximum entropy of every conservative midpoint, then
+       ! relax the strict one-ring lower bound in the positive variable
+       ! exp(s) without ever forming that variable explicitly.
+       this%flux_y%x = this%entropy_lower_bound%x
+       do edge = 1, this%graph%n_edges
+          associate(a => this%graph%left(:,edge), &
+               b => this%graph%right(:,edge))
+            state = 0.5_rp * [ &
+                 rho%x(a(1),a(2),a(3),a(4)) + &
+                 rho%x(b(1),b(2),b(3),b(4)), &
+                 m_x%x(a(1),a(2),a(3),a(4)) + &
+                 m_x%x(b(1),b(2),b(3),b(4)), &
+                 m_y%x(a(1),a(2),a(3),a(4)) + &
+                 m_y%x(b(1),b(2),b(3),b(4)), &
+                 m_z%x(a(1),a(2),a(3),a(4)) + &
+                 m_z%x(b(1),b(2),b(3),b(4)), &
+                 energy%x(a(1),a(2),a(3),a(4)) + &
+                 energy%x(b(1),b(2),b(3),b(4))]
+            entropy = euler_idp_specific_entropy(state, gamma)
+            this%flux_y%x(a(1),a(2),a(3),a(4)) = max( &
+                 this%flux_y%x(a(1),a(2),a(3),a(4)), entropy)
+            this%flux_y%x(b(1),b(2),b(3),b(4)) = max( &
+                 this%flux_y%x(b(1),b(2),b(3),b(4)), entropy)
+          end associate
+       end do
+       call profiler_start_region('Euler IDP gather-scatter')
+       call gs%op(this%flux_y, GS_OP_MAX)
+       call profiler_end_region('Euler IDP gather-scatter')
+       do i = 1, rho%size()
+          strict_lower = this%entropy_lower_bound%x(i,1,1,1)
+          call euler_idp_relax_entropy_bound(strict_lower, &
+               this%flux_y%x(i,1,1,1), &
+               this%entropy_bound_relaxation_factor, &
+               this%entropy_bound_relaxation_cap, relaxed_lower)
+          this%entropy_lower_bound%x(i,1,1,1) = relaxed_lower
        end do
     end if
     call profiler_end_region('Euler IDP bounds')

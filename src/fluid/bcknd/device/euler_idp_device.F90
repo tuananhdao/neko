@@ -61,9 +61,12 @@ module euler_idp_device
      logical :: periodic_graph = .false.
      logical :: low_order_only = .false.
      logical :: relax_density_bounds = .false.
+     logical :: relax_entropy_bounds = .false.
      logical :: limit_internal_energy = .true.
      logical :: limit_entropy = .true.
      real(kind=rp) :: density_bound_relaxation_factor = 1.0_rp
+     real(kind=rp) :: entropy_bound_relaxation_factor = 1.0_rp
+     real(kind=rp) :: entropy_bound_relaxation_cap = 0.01_rp
      real(kind=rp) :: correction_tolerance = 1.0e-10_rp
      real(kind=rp) :: domain_volume = 0.0_rp
      real(kind=rp) :: density_relaxation_mass = 0.0_rp
@@ -160,19 +163,32 @@ contains
     this%max_graph_rate = 0.0_rp
     this%max_graph_wave_speed = 0.0_rp
     this%maximum_graph_timestep = huge(1.0_rp)
+    this%relax_density_bounds = .false.
+    this%relax_entropy_bounds = .false.
+    this%low_order_only = .false.
+    this%limit_internal_energy = .true.
+    this%limit_entropy = .true.
+    this%density_bound_relaxation_factor = 1.0_rp
+    this%entropy_bound_relaxation_factor = 1.0_rp
+    this%entropy_bound_relaxation_cap = 0.01_rp
     this%initialized = .true.
   end subroutine euler_idp_device_init
 
   subroutine euler_idp_device_init_graph(this, coef, gs, &
-       relax_density_bounds, low_order_only, limit_internal_energy, &
-       limit_entropy, density_bound_relaxation_factor, time_order, &
-       diagnostics_level, correction_tolerance)
+       relax_density_bounds, relax_entropy_bounds, low_order_only, &
+       limit_internal_energy, limit_entropy, &
+       density_bound_relaxation_factor, entropy_bound_relaxation_factor, &
+       entropy_bound_relaxation_cap, time_order, diagnostics_level, &
+       correction_tolerance)
     class(euler_idp_device_t), intent(inout) :: this
     type(coef_t), target, intent(in) :: coef
     type(gs_t), intent(inout) :: gs
-    logical, intent(in) :: relax_density_bounds, low_order_only
+    logical, intent(in) :: relax_density_bounds, relax_entropy_bounds
+    logical, intent(in) :: low_order_only
     logical, intent(in) :: limit_internal_energy, limit_entropy
     real(kind=rp), intent(in) :: density_bound_relaxation_factor
+    real(kind=rp), intent(in) :: entropy_bound_relaxation_factor
+    real(kind=rp), intent(in) :: entropy_bound_relaxation_cap
     real(kind=rp), intent(in) :: correction_tolerance
     integer, intent(in) :: time_order, diagnostics_level
     real(kind=rp) :: local_mass, global_mass, local_error, global_error
@@ -187,10 +203,14 @@ contains
        call neko_error('Euler IDP device object is not initialised')
     end if
     this%relax_density_bounds = relax_density_bounds
+    this%relax_entropy_bounds = relax_entropy_bounds
     this%low_order_only = low_order_only
     this%limit_internal_energy = limit_internal_energy
     this%limit_entropy = limit_entropy
     this%density_bound_relaxation_factor = density_bound_relaxation_factor
+    this%entropy_bound_relaxation_factor = &
+         entropy_bound_relaxation_factor
+    this%entropy_bound_relaxation_cap = entropy_bound_relaxation_cap
     this%correction_tolerance = correction_tolerance
     this%time_order = time_order
     this%diagnostics_level = diagnostics_level
@@ -389,9 +409,12 @@ contains
     this%periodic_graph = .false.
     this%low_order_only = .false.
     this%relax_density_bounds = .false.
+    this%relax_entropy_bounds = .false.
     this%limit_internal_energy = .true.
     this%limit_entropy = .true.
     this%density_bound_relaxation_factor = 1.0_rp
+    this%entropy_bound_relaxation_factor = 1.0_rp
+    this%entropy_bound_relaxation_cap = 0.01_rp
     this%correction_tolerance = 1.0e-10_rp
     this%time_order = 1
     this%diagnostics_level = EULER_IDP_DIAGNOSTICS_FULL
@@ -966,6 +989,18 @@ contains
             this%density_bound_relaxation_factor, &
             this%density_relaxation_mass, this%domain_volume, &
             this%graph%n_directions, n)
+    end if
+    if (this%limit_entropy .and. this%relax_entropy_bounds) then
+       call device_copy(this%work_1%x_d, &
+            this%entropy_lower_bound%x_d, n)
+       call cuda_euler_idp_entropy_relax_edges(rho%x_d, m_x%x_d, &
+            m_y%x_d, m_z%x_d, energy%x_d, this%edge_left_d, &
+            this%edge_right_d, this%work_1%x_d, gamma, n_edges)
+       call gs%op(this%work_1, GS_OP_MAX)
+       call cuda_euler_idp_entropy_relax_finalize( &
+            this%entropy_lower_bound%x_d, this%work_1%x_d, &
+            this%entropy_bound_relaxation_factor, &
+            this%entropy_bound_relaxation_cap, n)
     end if
 #endif
   end subroutine euler_idp_device_compute_bounds

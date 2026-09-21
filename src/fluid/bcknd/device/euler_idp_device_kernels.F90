@@ -31,6 +31,8 @@ module euler_idp_device_kernels
   public :: cuda_euler_idp_low_update, cuda_euler_idp_bounds_init
   public :: cuda_euler_idp_bounds_edges, cuda_euler_idp_relax_edges
   public :: cuda_euler_idp_relax_finalize, cuda_euler_idp_blend
+  public :: cuda_euler_idp_entropy_relax_edges
+  public :: cuda_euler_idp_entropy_relax_finalize
   public :: cuda_euler_idp_limiter, cuda_euler_idp_incidence
   public :: cuda_euler_idp_correction_update, cuda_euler_idp_validate
   public :: cuda_euler_idp_full_diagnostics
@@ -174,6 +176,25 @@ module euler_idp_device_kernels
        real(c_rp) :: factor, nodal_mass, volume
        integer(c_int) :: dimensions, n
      end subroutine cuda_euler_idp_relax_finalize
+
+     subroutine cuda_euler_idp_entropy_relax_edges(rho, mx, my, mz, energy, &
+          left, right, midpoint_max, gamma, n_edges) &
+          bind(c, name = 'cuda_euler_idp_entropy_relax_edges')
+       import c_ptr, c_int, c_rp
+       type(c_ptr), value :: rho, mx, my, mz, energy, left, right
+       type(c_ptr), value :: midpoint_max
+       real(c_rp) :: gamma
+       integer(c_int) :: n_edges
+     end subroutine cuda_euler_idp_entropy_relax_edges
+
+     subroutine cuda_euler_idp_entropy_relax_finalize(lower, midpoint_max, &
+          factor, maximum_fraction, n) &
+          bind(c, name = 'cuda_euler_idp_entropy_relax_finalize')
+       import c_ptr, c_int, c_rp
+       type(c_ptr), value :: lower, midpoint_max
+       real(c_rp) :: factor, maximum_fraction
+       integer(c_int) :: n
+     end subroutine cuda_euler_idp_entropy_relax_finalize
 
      subroutine cuda_euler_idp_blend(rho, mx, my, mz, energy, left, right, &
           edge_viscosity, entropy_fraction, correction, dt, has_entropy, &

@@ -63,9 +63,12 @@ module euler_idp
      logical :: enabled = .false.
      logical :: low_order_only = .false.
      logical :: relax_density_bounds = .false.
+     logical :: relax_entropy_bounds = .false.
      logical :: limit_internal_energy = .true.
      logical :: limit_entropy = .true.
      real(kind=rp) :: density_bound_relaxation_factor = 1.0_rp
+     real(kind=rp) :: entropy_bound_relaxation_factor = 1.0_rp
+     real(kind=rp) :: entropy_bound_relaxation_cap = 0.01_rp
      real(kind=rp) :: internal_energy_floor = 1.0e-12_rp
      real(kind=rp) :: correction_tolerance = 1.0e-10_rp
      integer :: diagnostics_level = EULER_IDP_DIAGNOSTICS_FULL
@@ -128,9 +131,12 @@ contains
     this%enabled = .false.
     this%low_order_only = .false.
     this%relax_density_bounds = .false.
+    this%relax_entropy_bounds = .false.
     this%limit_internal_energy = .true.
     this%limit_entropy = .true.
     this%density_bound_relaxation_factor = 1.0_rp
+    this%entropy_bound_relaxation_factor = 1.0_rp
+    this%entropy_bound_relaxation_cap = 0.01_rp
     this%internal_energy_floor = 1.0e-12_rp
     this%correction_tolerance = 1.0e-10_rp
     this%diagnostics_level = EULER_IDP_DIAGNOSTICS_FULL
@@ -143,6 +149,8 @@ contains
          this%low_order_only, .false.)
     call json_get_or_default(params, root // 'relax_density_bounds', &
          this%relax_density_bounds, .false.)
+    call json_get_or_default(params, root // 'relax_entropy_bounds', &
+         this%relax_entropy_bounds, .false.)
     call json_get_or_default(params, root // 'limit_internal_energy', &
          this%limit_internal_energy, .true.)
     call json_get_or_default(params, root // 'limit_entropy', &
@@ -150,6 +158,11 @@ contains
     call json_get_or_default(params, &
          root // 'density_bound_relaxation_factor', &
          this%density_bound_relaxation_factor, 1.0_rp)
+    call json_get_or_default(params, &
+         root // 'entropy_bound_relaxation_factor', &
+         this%entropy_bound_relaxation_factor, 1.0_rp)
+    call json_get_or_default(params, root // 'entropy_bound_relaxation_cap', &
+         this%entropy_bound_relaxation_cap, 0.01_rp)
     call json_get_or_default(params, root // 'internal_energy_floor', &
          this%internal_energy_floor, 1.0e-12_rp)
     call json_get_or_default(params, root // 'correction_tolerance', &
@@ -189,6 +202,17 @@ contains
        message = 'density_bound_relaxation_factor must be finite and positive'
        return
     end if
+    if (.not. ieee_is_finite(this%entropy_bound_relaxation_factor) .or. &
+         this%entropy_bound_relaxation_factor .le. 0.0_rp) then
+       message = 'entropy_bound_relaxation_factor must be finite and positive'
+       return
+    end if
+    if (.not. ieee_is_finite(this%entropy_bound_relaxation_cap) .or. &
+         this%entropy_bound_relaxation_cap .le. 0.0_rp .or. &
+         this%entropy_bound_relaxation_cap .ge. 1.0_rp) then
+       message = 'entropy_bound_relaxation_cap must be finite and in (0,1)'
+       return
+    end if
     if (.not. ieee_is_finite(this%correction_tolerance) .or. &
          this%correction_tolerance .le. 0.0_rp) then
        message = 'correction_tolerance must be finite and positive'
@@ -226,9 +250,12 @@ contains
     end if
     call this%backend%init(dof)
     call this%backend%init_graph(coef, gs, config%relax_density_bounds, &
-         config%low_order_only, config%limit_internal_energy, &
-         config%limit_entropy, config%density_bound_relaxation_factor, &
-         time_order, config%diagnostics_level, config%correction_tolerance)
+         config%relax_entropy_bounds, config%low_order_only, &
+         config%limit_internal_energy, config%limit_entropy, &
+         config%density_bound_relaxation_factor, &
+         config%entropy_bound_relaxation_factor, &
+         config%entropy_bound_relaxation_cap, time_order, &
+         config%diagnostics_level, config%correction_tolerance)
     this%config = config
     this%time_order = time_order
     this%stage = euler_idp_stage_t()

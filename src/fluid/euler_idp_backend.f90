@@ -53,6 +53,7 @@ module euler_idp_backend
   public :: euler_idp_state_is_admissible, euler_idp_specific_entropy
   public :: euler_idp_entropy_tolerance, euler_idp_entropy_is_admissible
   public :: euler_idp_local_entropy_bounds, euler_idp_relax_density_bounds
+  public :: euler_idp_relax_entropy_bound
   public :: euler_idp_limit_endpoint, euler_idp_limit_edge
 
   !> State and graph data immediately around a strong boundary map.
@@ -166,16 +167,21 @@ module euler_idp_backend
      end subroutine euler_idp_backend_init_intrf
 
      subroutine euler_idp_backend_init_graph_intrf(this, coef, gs, &
-          relax_density_bounds, low_order_only, limit_internal_energy, &
-          limit_entropy, density_bound_relaxation_factor, time_order, &
-          diagnostics_level, correction_tolerance)
+          relax_density_bounds, relax_entropy_bounds, low_order_only, &
+          limit_internal_energy, limit_entropy, &
+          density_bound_relaxation_factor, entropy_bound_relaxation_factor, &
+          entropy_bound_relaxation_cap, time_order, diagnostics_level, &
+          correction_tolerance)
        import :: coef_t, gs_t, rp, euler_idp_backend_t
        class(euler_idp_backend_t), intent(inout) :: this
        type(coef_t), target, intent(in) :: coef
        type(gs_t), intent(inout) :: gs
-       logical, intent(in) :: relax_density_bounds, low_order_only
+       logical, intent(in) :: relax_density_bounds, relax_entropy_bounds
+       logical, intent(in) :: low_order_only
        logical, intent(in) :: limit_internal_energy, limit_entropy
        real(kind=rp), intent(in) :: density_bound_relaxation_factor
+       real(kind=rp), intent(in) :: entropy_bound_relaxation_factor
+       real(kind=rp), intent(in) :: entropy_bound_relaxation_cap
        real(kind=rp), intent(in) :: correction_tolerance
        integer, intent(in) :: time_order, diagnostics_level
      end subroutine euler_idp_backend_init_graph_intrf
@@ -747,6 +753,28 @@ contains
          strict_lower - relaxation)
     relaxed_upper = strict_upper + relaxation
   end subroutine euler_idp_relax_density_bounds
+
+  !> Relax a strict logarithmic specific-entropy lower bound.
+  !!
+  !! The positive entropy variable is chi = exp(s).  The midpoint maximum
+  !! supplies the graph-linear variation used by the entropy relaxation of
+  !! Guermond et al.  Evaluation in logarithmic variables avoids overflow and
+  !! makes the result invariant under an additive shift of the entropy.
+  pure subroutine euler_idp_relax_entropy_bound(strict_lower, midpoint_max, &
+       relaxation_factor, maximum_fraction, relaxed_lower)
+    real(kind=rp), intent(in) :: strict_lower, midpoint_max
+    real(kind=rp), intent(in) :: relaxation_factor, maximum_fraction
+    real(kind=rp), intent(out) :: relaxed_lower
+    real(kind=rp) :: cutoff, entropy_difference, relative_variation
+    real(kind=rp) :: relaxation
+
+    cutoff = log(1.0_rp + maximum_fraction / relaxation_factor)
+    entropy_difference = max(0.0_rp, midpoint_max - strict_lower)
+    relative_variation = exp(min(entropy_difference, cutoff)) - 1.0_rp
+    relaxation = min(maximum_fraction, &
+         relaxation_factor * max(0.0_rp, relative_variation))
+    relaxed_lower = strict_lower + log(1.0_rp - relaxation)
+  end subroutine euler_idp_relax_entropy_bound
 
   !> Limit one directed auxiliary correction to the Euler admissible set.
   pure subroutine euler_idp_limit_endpoint(base, correction, density_lower, &
