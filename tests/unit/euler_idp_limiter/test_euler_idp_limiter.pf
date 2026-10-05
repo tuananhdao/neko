@@ -293,7 +293,9 @@ subroutine test_entropy_bound_relaxation()
   implicit none
 
   real(kind=rp), parameter :: factor = 1.0_rp
-  real(kind=rp), parameter :: maximum_fraction = 0.01_rp
+  real(kind=rp), parameter :: nodal_mass = 1.0e-4_rp
+  real(kind=rp), parameter :: domain_volume = 1.0_rp
+  integer, parameter :: dimension = 3
   real(kind=rp), parameter :: strict_lower = -2.0_rp
   real(kind=rp) :: expected_lower, relaxed_lower, shifted_lower
   real(kind=rp) :: tolerance
@@ -301,22 +303,30 @@ subroutine test_entropy_bound_relaxation()
   tolerance = 128.0_rp * epsilon(1.0_rp)
 
   call euler_idp_relax_entropy_bound(strict_lower, strict_lower, factor, &
-       maximum_fraction, relaxed_lower)
+       nodal_mass, domain_volume, dimension, relaxed_lower)
   @assertEqual(strict_lower, relaxed_lower, tolerance=tolerance)
 
   call euler_idp_relax_entropy_bound(strict_lower, &
-       strict_lower + log(1.005_rp), factor, maximum_fraction, relaxed_lower)
+       strict_lower + log(1.005_rp), factor, nodal_mass, domain_volume, &
+       dimension, relaxed_lower)
   expected_lower = strict_lower + log(0.995_rp)
   @assertEqual(expected_lower, relaxed_lower, tolerance=tolerance)
 
   call euler_idp_relax_entropy_bound(strict_lower, &
-       strict_lower + log(2.0_rp), factor, maximum_fraction, relaxed_lower)
+       strict_lower + log(2.0_rp), factor, nodal_mass, domain_volume, &
+       dimension, relaxed_lower)
   expected_lower = strict_lower + log(0.99_rp)
   @assertEqual(expected_lower, relaxed_lower, tolerance=tolerance)
 
+  call euler_idp_relax_entropy_bound(strict_lower, &
+       strict_lower + log(2.0_rp), factor, 4.0_rp * nodal_mass, &
+       domain_volume, dimension, relaxed_lower)
+  expected_lower = strict_lower + log(0.98_rp)
+  @assertEqual(expected_lower, relaxed_lower, tolerance=tolerance)
+
   call euler_idp_relax_entropy_bound(strict_lower + 100.0_rp, &
-       strict_lower + 100.0_rp + log(1.005_rp), factor, maximum_fraction, &
-       shifted_lower)
+       strict_lower + 100.0_rp + log(1.005_rp), factor, nodal_mass, &
+       domain_volume, dimension, shifted_lower)
   expected_lower = strict_lower + 100.0_rp + log(0.995_rp)
   @assertEqual(expected_lower, shifted_lower, tolerance=1024.0_rp * tolerance)
 end subroutine test_entropy_bound_relaxation

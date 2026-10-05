@@ -293,6 +293,50 @@ contains
     call free_warped_hex_fixture(graph, coef, gs, dof, Xh, msh)
   end subroutine test_direct_correction_matches_convex_form
 
+  !> The geometry-aware graph second difference must annihilate affine data
+  !! despite the nonuniform spacing of the GLL nodes.
+  @test(npes=[1])
+  subroutine test_gll_second_difference_annihilates_affine(this)
+    class(test_euler_gll_graph), intent(inout) :: this
+    type(mesh_t) :: msh
+    type(space_t) :: Xh
+    type(dofmap_t) :: dof
+    type(gs_t) :: gs
+    type(coef_t) :: coef
+    type(euler_gll_graph_t) :: graph
+    real(kind=rp) :: profile(lx_test,lx_test,lx_test,1)
+    real(kind=rp) :: second_difference(lx_test,lx_test,lx_test,1)
+    real(kind=rp) :: difference, maximum_weight, tolerance
+    integer :: edge
+
+    call build_affine_hex_fixture(msh, Xh, dof, gs, coef)
+    call graph%init(coef, gs)
+    profile = 1.0_rp + 0.3_rp * dof%x - 0.2_rp * dof%y + &
+         0.4_rp * dof%z
+    second_difference = 0.0_rp
+    do edge = 1, graph%n_edges
+       associate(a => graph%left(:,edge), b => graph%right(:,edge))
+         difference = profile(a(1),a(2),a(3),a(4)) - &
+              profile(b(1),b(2),b(3),b(4))
+         second_difference(a(1),a(2),a(3),a(4)) = &
+              second_difference(a(1),a(2),a(3),a(4)) + &
+              graph%second_difference_weight_left(edge) * difference
+         second_difference(b(1),b(2),b(3),b(4)) = &
+              second_difference(b(1),b(2),b(3),b(4)) - &
+              graph%second_difference_weight_right(edge) * difference
+       end associate
+    end do
+
+    maximum_weight = max(maxval(graph%second_difference_weight_left), &
+         maxval(graph%second_difference_weight_right))
+    tolerance = 512.0_rp * epsilon(1.0_rp)
+    difference = maxval(abs(second_difference))
+    @assertTrue(maximum_weight .gt. 0.0_rp)
+    @assertEqual(0.0_rp, difference, tolerance=tolerance)
+
+    call free_warped_hex_fixture(graph, coef, gs, dof, Xh, msh)
+  end subroutine test_gll_second_difference_annihilates_affine
+
   !> The CPU backend must apply the three SSPRK convex combinations to every
   !! conserved component without altering the saved start-of-step state.
   @test(npes=[1])
@@ -326,7 +370,7 @@ contains
 
     call backend%init(dof)
     call backend%init_graph(coef, gs, .false., .false., .true., .true., &
-         1.0_rp, 3, EULER_IDP_DIAGNOSTICS_OFF, 1.0e-10_rp)
+         .true., 1.0_rp, 1.0_rp, 3, EULER_IDP_DIAGNOSTICS_OFF, 1.0e-10_rp)
     call backend%save_state(state(1), state(2), state(3), state(4), &
          state(5))
     tolerance = 128.0_rp * epsilon(1.0_rp)

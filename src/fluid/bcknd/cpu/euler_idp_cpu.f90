@@ -77,7 +77,6 @@ module euler_idp_cpu
      logical :: limit_entropy = .true.
      real(kind=rp) :: density_bound_relaxation_factor = 1.0_rp
      real(kind=rp) :: entropy_bound_relaxation_factor = 1.0_rp
-     real(kind=rp) :: entropy_bound_relaxation_cap = 0.01_rp
      real(kind=rp) :: correction_tolerance = 1.0e-10_rp
      type(euler_gll_graph_t) :: graph
      type(field_t) :: local_residual(EULER_IDP_NCOMP)
@@ -181,7 +180,6 @@ contains
     this%limit_entropy = .true.
     this%density_bound_relaxation_factor = 1.0_rp
     this%entropy_bound_relaxation_factor = 1.0_rp
-    this%entropy_bound_relaxation_cap = 0.01_rp
     this%initialized = .true.
   end subroutine euler_idp_cpu_init
 
@@ -189,8 +187,8 @@ contains
   subroutine euler_idp_cpu_init_graph(this, coef, gs, relax_density_bounds, &
        relax_entropy_bounds, low_order_only, limit_internal_energy, &
        limit_entropy, density_bound_relaxation_factor, &
-       entropy_bound_relaxation_factor, entropy_bound_relaxation_cap, &
-       time_order, diagnostics_level, correction_tolerance)
+       entropy_bound_relaxation_factor, time_order, diagnostics_level, &
+       correction_tolerance)
     class(euler_idp_cpu_t), intent(inout) :: this
     type(coef_t), target, intent(in) :: coef
     type(gs_t), intent(inout) :: gs
@@ -199,7 +197,6 @@ contains
     logical, intent(in) :: limit_internal_energy, limit_entropy
     real(kind=rp), intent(in) :: density_bound_relaxation_factor
     real(kind=rp), intent(in) :: entropy_bound_relaxation_factor
-    real(kind=rp), intent(in) :: entropy_bound_relaxation_cap
     real(kind=rp), intent(in) :: correction_tolerance
     integer, intent(in) :: time_order, diagnostics_level
     real(kind=rp) :: local_error, global_error
@@ -218,7 +215,6 @@ contains
     this%limit_entropy = .true.
     this%density_bound_relaxation_factor = 1.0_rp
     this%entropy_bound_relaxation_factor = 1.0_rp
-    this%entropy_bound_relaxation_cap = 0.01_rp
     this%relax_density_bounds = relax_density_bounds
     this%relax_entropy_bounds = relax_entropy_bounds
     this%low_order_only = low_order_only
@@ -228,7 +224,6 @@ contains
          density_bound_relaxation_factor
     this%entropy_bound_relaxation_factor = &
          entropy_bound_relaxation_factor
-    this%entropy_bound_relaxation_cap = entropy_bound_relaxation_cap
     this%diagnostics_level = diagnostics_level
     do component = 1, EULER_IDP_NCOMP
        call this%local_residual(component)%free()
@@ -394,7 +389,6 @@ contains
     this%limit_entropy = .true.
     this%density_bound_relaxation_factor = 1.0_rp
     this%entropy_bound_relaxation_factor = 1.0_rp
-    this%entropy_bound_relaxation_cap = 0.01_rp
     this%correction_tolerance = 1.0e-10_rp
     this%max_graph_rate = 0.0_rp
     this%max_graph_wave_speed = 0.0_rp
@@ -737,15 +731,13 @@ contains
               this%density_upper_bound%x(b(1),b(2),b(3),b(4)), &
               left_density, bar_density)
          if (this%relax_density_bounds) then
-            ! Collapse duplicate element occurrences to the unique-neighbour
-            ! stencil used by the density-bound relaxation.
-            direction = this%graph%direction(edge)
-            left_weight = 2.0_rp / &
-                 this%graph%directional_degree(direction)%x( &
-                 a(1),a(2),a(3),a(4))
-            right_weight = 2.0_rp / &
-                 this%graph%directional_degree(direction)%x( &
-                 b(1),b(2),b(3),b(4))
+            ! Geometry-aware divided differences annihilate affine data on
+            ! the nonuniform GLL spacing.  The precomputed endpoint weights
+            ! also collapse duplicate element occurrences after assembly.
+            left_weight = &
+                 this%graph%second_difference_weight_left(edge)
+            right_weight = &
+                 this%graph%second_difference_weight_right(edge)
             difference = left_density - right_density
             this%flux_x%x(a(1),a(2),a(3),a(4)) = &
                  this%flux_x%x(a(1),a(2),a(3),a(4)) + &
@@ -887,7 +879,8 @@ contains
           call euler_idp_relax_entropy_bound(strict_lower, &
                this%flux_y%x(i,1,1,1), &
                this%entropy_bound_relaxation_factor, &
-               this%entropy_bound_relaxation_cap, relaxed_lower)
+               this%density_relaxation_mass, this%domain_volume, &
+               this%graph%n_directions, relaxed_lower)
           this%entropy_lower_bound%x(i,1,1,1) = relaxed_lower
        end do
     end if

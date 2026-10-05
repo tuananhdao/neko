@@ -155,7 +155,6 @@ def _case(
     relax_density_bounds=False,
     relax_entropy_bounds=False,
     entropy_bound_relaxation_factor=1.0,
-    entropy_bound_relaxation_cap=0.01,
 ):
     """Build a short, output-free Euler IDP case."""
     output_dir = runtime["directory"] / (
@@ -190,9 +189,6 @@ def _case(
                     "limit_entropy": limit_entropy,
                     "entropy_bound_relaxation_factor": (
                         entropy_bound_relaxation_factor
-                    ),
-                    "entropy_bound_relaxation_cap": (
-                        entropy_bound_relaxation_cap
                     ),
                     "internal_energy_floor": internal_energy_floor,
                     "diagnostics_level": diagnostics_level,
@@ -289,7 +285,6 @@ def _run_case(
     relax_density_bounds=False,
     relax_entropy_bounds=False,
     entropy_bound_relaxation_factor=1.0,
-    entropy_bound_relaxation_cap=0.01,
     case_label=None,
     record_parity=True,
 ):
@@ -310,7 +305,6 @@ def _run_case(
         relax_density_bounds,
         relax_entropy_bounds,
         entropy_bound_relaxation_factor,
-        entropy_bound_relaxation_cap,
     )
     label = case_label or problem
     suffix = (

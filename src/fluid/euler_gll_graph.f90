@@ -63,6 +63,9 @@ module euler_gll_graph
      integer, allocatable :: element_edge_start(:)
      real(kind=rp), allocatable :: coefficient(:,:)
      real(kind=rp), allocatable :: coefficient_norm(:)
+     !> Geometry-aware endpoint weights for the density second difference.
+     real(kind=rp), allocatable :: second_difference_weight_left(:)
+     real(kind=rp), allocatable :: second_difference_weight_right(:)
      real(kind=rp), allocatable :: diagonal_coefficient(:,:,:,:,:)
      !> One-dimensional GLL quadrature weights used by reconstruction.
      real(kind=rp), allocatable :: weight_x(:)
@@ -103,8 +106,11 @@ contains
     real(kind=rp) :: transverse_weight
     real(kind=rp) :: local_error, global_error, local_scale, global_scale
     real(kind=rp) :: metric_tolerance
+    real(kind=rp) :: backward_distance, edge_length, forward_distance
+    real(kind=rp) :: second_difference_scale
     logical :: local_affine
     real(kind=rp), allocatable :: coefficient_correction(:)
+    type(field_t) :: backward_spacing(3), forward_spacing(3)
     character(len=LOG_SIZE) :: message
     character(len=48) :: name
     integer :: direction, edge, e, i, ierr, j, k
@@ -140,6 +146,8 @@ contains
     allocate(this%direction(this%n_edges))
     allocate(this%coefficient(3, this%n_edges))
     allocate(this%coefficient_norm(this%n_edges))
+    allocate(this%second_difference_weight_left(this%n_edges))
+    allocate(this%second_difference_weight_right(this%n_edges))
     allocate(this%element_edge_start(this%nelv + 1))
     this%element_edge_start = 1
     allocate(this%diagonal_coefficient(3, this%lx, this%ly, this%lz, &
@@ -374,6 +382,122 @@ contains
                DEVICE_TO_HOST, sync = direction .eq. 3)
        end do
     end if
+
+    ! Build the metric weights for
+    !
+    !   2 h^- h^+ / (h^- + h^+) *
+    !     ((u_i-u_{i+1})/h^+ + (u_i-u_{i-1})/h^-).
+    !
+    ! The directional degree removes duplicate element occurrences at an
+    ! assembled node.  A direction without neighbours on both sides (a
+    ! physical boundary) receives zero relaxation rather than an O(h)
+    ! one-sided graph difference.
+    do direction = 1, 3
+       write(name, '(A,I0)') 'euler_gll_graph_backward_spacing_', direction
+       call backward_spacing(direction)%init(coef%dof, trim(name))
+       write(name, '(A,I0)') 'euler_gll_graph_forward_spacing_', direction
+       call forward_spacing(direction)%init(coef%dof, trim(name))
+       backward_spacing(direction)%x = 0.0_rp
+       forward_spacing(direction)%x = 0.0_rp
+    end do
+    do edge = 1, this%n_edges
+       associate(a => this%left(:,edge), b => this%right(:,edge))
+         direction = this%direction(edge)
+         edge_length = sqrt( &
+              (coef%dof%x(b(1),b(2),b(3),b(4)) - &
+               coef%dof%x(a(1),a(2),a(3),a(4)))**2 + &
+              (coef%dof%y(b(1),b(2),b(3),b(4)) - &
+               coef%dof%y(a(1),a(2),a(3),a(4)))**2 + &
+              (coef%dof%z(b(1),b(2),b(3),b(4)) - &
+               coef%dof%z(a(1),a(2),a(3),a(4)))**2)
+         if (edge_length .le. tiny(1.0_rp)) then
+            call neko_error('Euler GLL graph contains coincident neighbours')
+         end if
+         forward_spacing(direction)%x(a(1),a(2),a(3),a(4)) = &
+              forward_spacing(direction)%x(a(1),a(2),a(3),a(4)) + &
+              edge_length
+         backward_spacing(direction)%x(b(1),b(2),b(3),b(4)) = &
+              backward_spacing(direction)%x(b(1),b(2),b(3),b(4)) + &
+              edge_length
+       end associate
+    end do
+    if (NEKO_BCKND_DEVICE .eq. 1) then
+       do direction = 1, 3
+          call device_memcpy(backward_spacing(direction)%x, &
+               backward_spacing(direction)%x_d, this%mass%size(), &
+               HOST_TO_DEVICE, sync = .false.)
+          call device_memcpy(forward_spacing(direction)%x, &
+               forward_spacing(direction)%x_d, this%mass%size(), &
+               HOST_TO_DEVICE, sync = direction .eq. 3)
+       end do
+    end if
+    do direction = 1, 3
+       call gs%op(backward_spacing(direction), GS_OP_ADD)
+       call gs%op(forward_spacing(direction), GS_OP_ADD)
+    end do
+    if (NEKO_BCKND_DEVICE .eq. 1) then
+       do direction = 1, 3
+          call device_memcpy(backward_spacing(direction)%x, &
+               backward_spacing(direction)%x_d, this%mass%size(), &
+               DEVICE_TO_HOST, sync = .false.)
+          call device_memcpy(forward_spacing(direction)%x, &
+               forward_spacing(direction)%x_d, this%mass%size(), &
+               DEVICE_TO_HOST, sync = direction .eq. 3)
+       end do
+    end if
+
+    do edge = 1, this%n_edges
+       associate(a => this%left(:,edge), b => this%right(:,edge))
+         direction = this%direction(edge)
+         edge_length = sqrt( &
+              (coef%dof%x(b(1),b(2),b(3),b(4)) - &
+               coef%dof%x(a(1),a(2),a(3),a(4)))**2 + &
+              (coef%dof%y(b(1),b(2),b(3),b(4)) - &
+               coef%dof%y(a(1),a(2),a(3),a(4)))**2 + &
+              (coef%dof%z(b(1),b(2),b(3),b(4)) - &
+               coef%dof%z(a(1),a(2),a(3),a(4)))**2)
+
+         backward_distance = 2.0_rp * &
+              backward_spacing(direction)%x(a(1),a(2),a(3),a(4)) / &
+              this%directional_degree(direction)%x(a(1),a(2),a(3),a(4))
+         forward_distance = 2.0_rp * &
+              forward_spacing(direction)%x(a(1),a(2),a(3),a(4)) / &
+              this%directional_degree(direction)%x(a(1),a(2),a(3),a(4))
+         if (backward_distance .gt. 0.0_rp .and. &
+              forward_distance .gt. 0.0_rp) then
+            second_difference_scale = 2.0_rp * backward_distance * &
+                 forward_distance / (backward_distance + forward_distance)
+         else
+            second_difference_scale = 0.0_rp
+         end if
+         this%second_difference_weight_left(edge) = 2.0_rp * &
+              second_difference_scale / &
+              (this%directional_degree(direction)%x( &
+              a(1),a(2),a(3),a(4)) * edge_length)
+
+         backward_distance = 2.0_rp * &
+              backward_spacing(direction)%x(b(1),b(2),b(3),b(4)) / &
+              this%directional_degree(direction)%x(b(1),b(2),b(3),b(4))
+         forward_distance = 2.0_rp * &
+              forward_spacing(direction)%x(b(1),b(2),b(3),b(4)) / &
+              this%directional_degree(direction)%x(b(1),b(2),b(3),b(4))
+         if (backward_distance .gt. 0.0_rp .and. &
+              forward_distance .gt. 0.0_rp) then
+            second_difference_scale = 2.0_rp * backward_distance * &
+                 forward_distance / (backward_distance + forward_distance)
+         else
+            second_difference_scale = 0.0_rp
+         end if
+         this%second_difference_weight_right(edge) = 2.0_rp * &
+              second_difference_scale / &
+              (this%directional_degree(direction)%x( &
+              b(1),b(2),b(3),b(4)) * edge_length)
+       end associate
+    end do
+    do direction = 1, 3
+       call backward_spacing(direction)%free()
+       call forward_spacing(direction)%free()
+    end do
     this%initialized = .true.
   end subroutine euler_gll_graph_init
 
@@ -388,6 +512,12 @@ contains
     if (allocated(this%coefficient)) deallocate(this%coefficient)
     if (allocated(this%coefficient_norm)) then
        deallocate(this%coefficient_norm)
+    end if
+    if (allocated(this%second_difference_weight_left)) then
+       deallocate(this%second_difference_weight_left)
+    end if
+    if (allocated(this%second_difference_weight_right)) then
+       deallocate(this%second_difference_weight_right)
     end if
     if (allocated(this%element_edge_start)) then
        deallocate(this%element_edge_start)

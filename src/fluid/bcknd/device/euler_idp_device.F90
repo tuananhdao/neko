@@ -66,7 +66,6 @@ module euler_idp_device
      logical :: limit_entropy = .true.
      real(kind=rp) :: density_bound_relaxation_factor = 1.0_rp
      real(kind=rp) :: entropy_bound_relaxation_factor = 1.0_rp
-     real(kind=rp) :: entropy_bound_relaxation_cap = 0.01_rp
      real(kind=rp) :: correction_tolerance = 1.0e-10_rp
      real(kind=rp) :: domain_volume = 0.0_rp
      real(kind=rp) :: density_relaxation_mass = 0.0_rp
@@ -85,6 +84,8 @@ module euler_idp_device
      type(field_t) :: work_1, work_2
      integer, allocatable :: edge_left(:), edge_right(:), edge_direction(:)
      real(kind=rp), allocatable :: edge_coefficient(:,:)
+     real(kind=rp), allocatable :: second_difference_weight_left(:)
+     real(kind=rp), allocatable :: second_difference_weight_right(:)
      real(kind=rp), allocatable :: diagonal_coefficient(:,:)
      real(kind=rp), allocatable :: edge_viscosity(:)
      real(kind=rp), allocatable :: correction_flux(:,:)
@@ -100,6 +101,8 @@ module euler_idp_device
      type(c_ptr) :: edge_right_d = c_null_ptr
      type(c_ptr) :: edge_direction_d = c_null_ptr
      type(c_ptr) :: edge_coefficient_d = c_null_ptr
+     type(c_ptr) :: second_difference_weight_left_d = c_null_ptr
+     type(c_ptr) :: second_difference_weight_right_d = c_null_ptr
      type(c_ptr) :: diagonal_coefficient_d = c_null_ptr
      type(c_ptr) :: edge_viscosity_d = c_null_ptr
      type(c_ptr) :: correction_flux_d = c_null_ptr
@@ -170,7 +173,6 @@ contains
     this%limit_entropy = .true.
     this%density_bound_relaxation_factor = 1.0_rp
     this%entropy_bound_relaxation_factor = 1.0_rp
-    this%entropy_bound_relaxation_cap = 0.01_rp
     this%initialized = .true.
   end subroutine euler_idp_device_init
 
@@ -178,8 +180,7 @@ contains
        relax_density_bounds, relax_entropy_bounds, low_order_only, &
        limit_internal_energy, limit_entropy, &
        density_bound_relaxation_factor, entropy_bound_relaxation_factor, &
-       entropy_bound_relaxation_cap, time_order, diagnostics_level, &
-       correction_tolerance)
+       time_order, diagnostics_level, correction_tolerance)
     class(euler_idp_device_t), intent(inout) :: this
     type(coef_t), target, intent(in) :: coef
     type(gs_t), intent(inout) :: gs
@@ -188,7 +189,6 @@ contains
     logical, intent(in) :: limit_internal_energy, limit_entropy
     real(kind=rp), intent(in) :: density_bound_relaxation_factor
     real(kind=rp), intent(in) :: entropy_bound_relaxation_factor
-    real(kind=rp), intent(in) :: entropy_bound_relaxation_cap
     real(kind=rp), intent(in) :: correction_tolerance
     integer, intent(in) :: time_order, diagnostics_level
     real(kind=rp) :: local_mass, global_mass, local_error, global_error
@@ -210,7 +210,6 @@ contains
     this%density_bound_relaxation_factor = density_bound_relaxation_factor
     this%entropy_bound_relaxation_factor = &
          entropy_bound_relaxation_factor
-    this%entropy_bound_relaxation_cap = entropy_bound_relaxation_cap
     this%correction_tolerance = correction_tolerance
     this%time_order = time_order
     this%diagnostics_level = diagnostics_level
@@ -246,6 +245,8 @@ contains
     allocate(this%edge_right(this%graph%n_edges))
     allocate(this%edge_direction(this%graph%n_edges))
     allocate(this%edge_coefficient(3, this%graph%n_edges))
+    allocate(this%second_difference_weight_left(this%graph%n_edges))
+    allocate(this%second_difference_weight_right(this%graph%n_edges))
     allocate(this%diagonal_coefficient(3, n))
     allocate(this%edge_viscosity(this%graph%n_edges))
     allocate(this%correction_flux(EULER_IDP_NCOMP, this%graph%n_edges))
@@ -279,6 +280,10 @@ contains
     end do
     this%edge_direction = this%graph%direction
     this%edge_coefficient = this%graph%coefficient
+    this%second_difference_weight_left = &
+         this%graph%second_difference_weight_left
+    this%second_difference_weight_right = &
+         this%graph%second_difference_weight_right
     this%diagonal_coefficient = reshape(this%graph%diagonal_coefficient, &
          shape(this%diagonal_coefficient))
     this%edge_viscosity = 0.0_rp
@@ -349,6 +354,10 @@ contains
     call device_map(this%edge_direction, this%edge_direction_d, n_edges)
     call device_map(this%edge_coefficient, this%edge_coefficient_d, &
          3 * n_edges)
+    call device_map(this%second_difference_weight_left, &
+         this%second_difference_weight_left_d, n_edges)
+    call device_map(this%second_difference_weight_right, &
+         this%second_difference_weight_right_d, n_edges)
     call device_map(this%diagonal_coefficient, &
          this%diagonal_coefficient_d, 3 * n)
     call device_map(this%edge_viscosity, this%edge_viscosity_d, n_edges)
@@ -382,6 +391,12 @@ contains
          HOST_TO_DEVICE, sync = .false.)
     call device_memcpy(this%edge_coefficient, this%edge_coefficient_d, &
          3 * n_edges, HOST_TO_DEVICE, sync = .false.)
+    call device_memcpy(this%second_difference_weight_left, &
+         this%second_difference_weight_left_d, n_edges, HOST_TO_DEVICE, &
+         sync = .false.)
+    call device_memcpy(this%second_difference_weight_right, &
+         this%second_difference_weight_right_d, n_edges, HOST_TO_DEVICE, &
+         sync = .false.)
     call device_memcpy(this%diagonal_coefficient, &
          this%diagonal_coefficient_d, 3 * n, HOST_TO_DEVICE, sync = .true.)
   end subroutine euler_idp_device_map_graph
@@ -414,7 +429,6 @@ contains
     this%limit_entropy = .true.
     this%density_bound_relaxation_factor = 1.0_rp
     this%entropy_bound_relaxation_factor = 1.0_rp
-    this%entropy_bound_relaxation_cap = 0.01_rp
     this%correction_tolerance = 1.0e-10_rp
     this%time_order = 1
     this%diagnostics_level = EULER_IDP_DIAGNOSTICS_FULL
@@ -447,6 +461,16 @@ contains
     if (allocated(this%edge_coefficient)) then
        call device_unmap(this%edge_coefficient, this%edge_coefficient_d)
        deallocate(this%edge_coefficient)
+    end if
+    if (allocated(this%second_difference_weight_left)) then
+       call device_unmap(this%second_difference_weight_left, &
+            this%second_difference_weight_left_d)
+       deallocate(this%second_difference_weight_left)
+    end if
+    if (allocated(this%second_difference_weight_right)) then
+       call device_unmap(this%second_difference_weight_right, &
+            this%second_difference_weight_right_d)
+       deallocate(this%second_difference_weight_right)
     end if
     if (allocated(this%diagonal_coefficient)) then
        call device_unmap(this%diagonal_coefficient, &
@@ -965,11 +989,10 @@ contains
        call device_copy(this%sound_speed%x_d, this%entropy_lower_bound%x_d, n)
     end if
     call cuda_euler_idp_bounds_edges(rho%x_d, m_x%x_d, m_y%x_d, m_z%x_d, &
-         this%edge_left_d, this%edge_right_d, this%edge_direction_d, &
+         this%edge_left_d, this%edge_right_d, &
          this%edge_coefficient_d, this%edge_viscosity_d, &
-         this%graph%directional_degree(1)%x_d, &
-         this%graph%directional_degree(2)%x_d, &
-         this%graph%directional_degree(3)%x_d, &
+         this%second_difference_weight_left_d, &
+         this%second_difference_weight_right_d, &
          this%density_lower_bound%x_d, this%density_upper_bound%x_d, &
          this%sound_speed%x_d, this%entropy_lower_bound%x_d, &
          this%work_1%x_d, relax, limit_entropy, n_edges)
@@ -1000,7 +1023,8 @@ contains
        call cuda_euler_idp_entropy_relax_finalize( &
             this%entropy_lower_bound%x_d, this%work_1%x_d, &
             this%entropy_bound_relaxation_factor, &
-            this%entropy_bound_relaxation_cap, n)
+            this%density_relaxation_mass, this%domain_volume, &
+            this%graph%n_directions, n)
     end if
 #endif
   end subroutine euler_idp_device_compute_bounds

@@ -170,8 +170,7 @@ module euler_idp_backend
           relax_density_bounds, relax_entropy_bounds, low_order_only, &
           limit_internal_energy, limit_entropy, &
           density_bound_relaxation_factor, entropy_bound_relaxation_factor, &
-          entropy_bound_relaxation_cap, time_order, diagnostics_level, &
-          correction_tolerance)
+          time_order, diagnostics_level, correction_tolerance)
        import :: coef_t, gs_t, rp, euler_idp_backend_t
        class(euler_idp_backend_t), intent(inout) :: this
        type(coef_t), target, intent(in) :: coef
@@ -181,7 +180,6 @@ module euler_idp_backend
        logical, intent(in) :: limit_internal_energy, limit_entropy
        real(kind=rp), intent(in) :: density_bound_relaxation_factor
        real(kind=rp), intent(in) :: entropy_bound_relaxation_factor
-       real(kind=rp), intent(in) :: entropy_bound_relaxation_cap
        real(kind=rp), intent(in) :: correction_tolerance
        integer, intent(in) :: time_order, diagnostics_level
      end subroutine euler_idp_backend_init_graph_intrf
@@ -758,20 +756,25 @@ contains
   !!
   !! The positive entropy variable is chi = exp(s).  The midpoint maximum
   !! supplies the graph-linear variation used by the entropy relaxation of
-  !! Guermond et al.  Evaluation in logarithmic variables avoids overflow and
-  !! makes the result invariant under an additive shift of the entropy.
+  !! Guermond et al.  Its cap r_h = (m_star / |D|)^(3/(2d)) follows the mesh
+  !! scale instead of remaining a fixed input.  Evaluation in logarithmic
+  !! variables avoids overflow and makes the result invariant under an
+  !! additive shift of the entropy.
   pure subroutine euler_idp_relax_entropy_bound(strict_lower, midpoint_max, &
-       relaxation_factor, maximum_fraction, relaxed_lower)
+       relaxation_factor, nodal_mass, domain_volume, dimension, relaxed_lower)
     real(kind=rp), intent(in) :: strict_lower, midpoint_max
-    real(kind=rp), intent(in) :: relaxation_factor, maximum_fraction
+    real(kind=rp), intent(in) :: relaxation_factor
+    real(kind=rp), intent(in) :: nodal_mass, domain_volume
+    integer, intent(in) :: dimension
     real(kind=rp), intent(out) :: relaxed_lower
     real(kind=rp) :: cutoff, entropy_difference, relative_variation
-    real(kind=rp) :: relaxation
+    real(kind=rp) :: relaxation, r_h
 
-    cutoff = log(1.0_rp + maximum_fraction / relaxation_factor)
+    r_h = (nodal_mass / domain_volume)**(1.5_rp / real(dimension, rp))
+    cutoff = log(1.0_rp + r_h / relaxation_factor)
     entropy_difference = max(0.0_rp, midpoint_max - strict_lower)
     relative_variation = exp(min(entropy_difference, cutoff)) - 1.0_rp
-    relaxation = min(maximum_fraction, &
+    relaxation = min(r_h, &
          relaxation_factor * max(0.0_rp, relative_variation))
     relaxed_lower = strict_lower + log(1.0_rp - relaxation)
   end subroutine euler_idp_relax_entropy_bound
